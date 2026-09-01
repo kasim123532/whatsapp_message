@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef } from "react";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { WS_URL } from "@/lib/api";
 import { toast } from "sonner";
@@ -11,6 +11,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const retryCountRef = useRef(0);
+  const [socket, setSocket] = useState<WebSocket | null>(null);
 
   useEffect(() => {
     function connect() {
@@ -25,6 +26,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       ws.onopen = () => {
         console.log("[WS] Connected to backend");
         retryCountRef.current = 0; // Reset retry count on success
+        setSocket(ws);
       };
 
       ws.onmessage = (event) => {
@@ -74,7 +76,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       ws.onclose = () => {
         console.log("[WS] Connection closed. Retrying...");
         wsRef.current = null;
-        
+        setSocket(null);
+
         // Exponential backoff capped at 16s
         const backoff = Math.min(1000 * Math.pow(2, retryCountRef.current), 16000);
         retryCountRef.current += 1;
@@ -103,7 +106,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, [queryClient]);
 
   return (
-    <WebSocketContext.Provider value={wsRef.current}>
+    <WebSocketContext.Provider value={socket}>
       {children}
     </WebSocketContext.Provider>
   );

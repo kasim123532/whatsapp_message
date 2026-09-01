@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { ContactGroup, Template, Campaign, WhatsAppProfile, SubGroup } from "@/types";
 
 const statusMap: Record<string, { label: string; className: string }> = {
