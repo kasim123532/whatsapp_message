@@ -10,6 +10,7 @@ import Contacts from "./pages/Contacts";
 import Templates from "./pages/Templates";
 import Campaigns from "./pages/Campaigns";
 import QrGenerator from "./pages/QrGenerator";
+import ProxyManagement from "./pages/ProxyManagement";
 import ConnectAccount from "./pages/ConnectAccount";
 import NotFound from "./pages/NotFound";
 
@@ -29,6 +30,7 @@ const App = () => (
             <Route path="/templates" element={<Templates />} />
             <Route path="/campaigns" element={<Campaigns />} />
             <Route path="/qr" element={<QrGenerator />} />
+            <Route path="/proxies" element={<ProxyManagement />} />
             <Route path="/connect/:id" element={<ConnectAccount />} />
             <Route path="*" element={<NotFound />} />
           </Routes>

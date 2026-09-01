@@ -1,4 +1,4 @@
-import { Users, MessageSquareText, Send, LayoutDashboard, Settings, QrCode } from "lucide-react";
+import { Users, MessageSquareText, Send, LayoutDashboard, Settings, QrCode, Wand2, Network } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import {
@@ -22,6 +22,7 @@ const mainItems = [
   { title: "Шаблоны", url: "/templates", icon: MessageSquareText },
   { title: "Рассылки", url: "/campaigns", icon: Send },
   { title: "QR по прокси", url: "/qr", icon: QrCode },
+  { title: "Управление прокси", url: "/proxies", icon: Network },
 ];
 
 export function AppSidebar() {
@@ -67,6 +68,19 @@ export function AppSidebar() {
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <a
+                    href="https://goodparser.ru/phone-format"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:bg-sidebar-accent/60 transition-colors flex items-center"
+                  >
+                    <Wand2 className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Форматирование</span>}
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

@@ -2,23 +2,25 @@ import { useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
-import { QrCode, Trash2, Loader2 } from "lucide-react";
+import { QrCode, Loader2 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
 import { Proxy, WhatsAppProfile } from "@/types";
 
+const NO_PROXY = "__none__";
+
 const QrGenerator = () => {
   const queryClient = useQueryClient();
-  const [proxyText, setProxyText] = useState("");
+  const [selectedProxy, setSelectedProxy] = useState(NO_PROXY);
   const [qrDialogOpen, setQrDialogOpen] = useState(false);
   const [activeQrId, setActiveQrId] = useState<string | null>(null);
 
-  const { data: proxies = [], isLoading } = useQuery<Proxy[]>({
+  const { data: proxies = [] } = useQuery<Proxy[]>({
     queryKey: ["proxies"],
     queryFn: () => apiRequest("/proxies")
   });
@@ -26,30 +28,6 @@ const QrGenerator = () => {
   const { data: accounts = [] } = useQuery<WhatsAppProfile[]>({
     queryKey: ["accounts"],
     queryFn: () => apiRequest("/accounts")
-  });
-
-  const addProxiesMutation = useMutation({
-    mutationFn: (text: string) =>
-      apiRequest("/proxies", { method: "POST", body: JSON.stringify({ text }) }),
-    onSuccess: (res: { added: number; skipped: number }) => {
-      queryClient.invalidateQueries({ queryKey: ["proxies"] });
-      setProxyText("");
-      toast.success(`Добавлено: ${res.added}${res.skipped ? `, пропущено дублей: ${res.skipped}` : ""}`);
-    },
-    onError: (err: any) => {
-      toast.error(err.message || "Ошибка добавления прокси");
-    }
-  });
-
-  const deleteProxyMutation = useMutation({
-    mutationFn: (id: string) => apiRequest(`/proxies/${id}`, { method: "DELETE" }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["proxies"] });
-      toast.success("Прокси удален");
-    },
-    onError: (err: any) => {
-      toast.error(err.message || "Ошибка удаления прокси");
-    }
   });
 
   const connectMutation = useMutation({
@@ -86,83 +64,54 @@ const QrGenerator = () => {
     toast.success("Ссылка скопирована");
   };
 
+  const handleGenerate = () => {
+    generateMutation.mutate(selectedProxy === NO_PROXY ? "" : selectedProxy);
+  };
+
   return (
     <DashboardLayout>
-      <div className="max-w-4xl mx-auto space-y-6">
+      <div className="max-w-lg mx-auto space-y-6">
         <div className="flex items-center gap-2">
           <QrCode className="h-6 w-6 text-primary" />
-          <h1 className="text-2xl font-display font-bold">Генерация QR по прокси</h1>
+          <h1 className="text-2xl font-display font-bold">Генерация QR</h1>
         </div>
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg font-display">Добавить прокси</CardTitle>
+            <CardTitle className="text-lg font-display">Новый WhatsApp профиль</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <p className="text-xs text-muted-foreground">
-              По одному прокси на строку: host:port или host:port:username:password
-            </p>
-            <Textarea
-              rows={4}
-              placeholder={"1.2.3.4:8080\n1.2.3.5:8080:user:pass"}
-              value={proxyText}
-              onChange={(e) => setProxyText(e.target.value)}
-            />
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold">Прокси (опционально)</label>
+              <Select value={selectedProxy} onValueChange={setSelectedProxy}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Выберите прокси" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_PROXY}>Без прокси</SelectItem>
+                  {proxies.map((p) => (
+                    <SelectItem key={p.id} value={p.value}>
+                      {p.value}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {proxies.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Список прокси пуст — можно продолжить без прокси, либо добавить прокси на странице "Управление прокси".
+                </p>
+              )}
+            </div>
             <Button
-              onClick={() => proxyText.trim() && addProxiesMutation.mutate(proxyText)}
-              disabled={!proxyText.trim() || addProxiesMutation.isPending}
+              className="w-full"
+              onClick={handleGenerate}
+              disabled={generateMutation.isPending || connectMutation.isPending}
             >
-              {addProxiesMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              Добавить
+              {generateMutation.isPending || connectMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Сгенерировать QR
             </Button>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg font-display">Доступные прокси</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-0">
-            {isLoading ? (
-              <div className="flex justify-center items-center py-10">
-                <Loader2 className="h-6 w-6 animate-spin text-primary" />
-              </div>
-            ) : (
-              <>
-                {proxies.map((p) => (
-                  <div
-                    key={p.id}
-                    className="flex items-center justify-between py-3 border-b last:border-0"
-                  >
-                    <span className="text-sm font-mono truncate">{p.value}</span>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-xs px-2 border-wa-green/30 text-wa-green hover:bg-wa-green/10"
-                        onClick={() => generateMutation.mutate(p.value)}
-                        disabled={generateMutation.isPending || connectMutation.isPending}
-                      >
-                        <QrCode className="h-3 w-3 mr-1" /> Сгенерировать QR
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs px-2 text-destructive hover:text-destructive"
-                        onClick={() => deleteProxyMutation.mutate(p.id)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-                {proxies.length === 0 && (
-                  <div className="text-center py-10 text-muted-foreground text-sm">
-                    Нет добавленных прокси. Вставьте список выше.
-                  </div>
-                )}
-              </>
-            )}
           </CardContent>
         </Card>
       </div>
