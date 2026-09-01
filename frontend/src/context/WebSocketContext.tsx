@@ -27,6 +27,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         console.log("[WS] Connected to backend");
         retryCountRef.current = 0; // Reset retry count on success
         setSocket(ws);
+        // Resync in case a status/qr broadcast fired while we were disconnected/reconnecting
+        queryClient.invalidateQueries({ queryKey: ["accounts"] });
       };
 
       ws.onmessage = (event) => {
@@ -37,7 +39,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             queryClient.setQueryData<WhatsAppProfile[]>(["accounts"], (old) => {
               if (!old) return old;
               return old.map((acc) =>
-                acc.phone === payload.phone
+                acc.id === payload.id
                   ? { ...acc, qr: payload.qr, status: "CONNECTING" }
                   : acc
               );
@@ -45,23 +47,25 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           } else if (payload.type === "status") {
             queryClient.setQueryData<WhatsAppProfile[]>(["accounts"], (old) => {
               if (!old) return old;
-              
-              const existingAccount = old.find((acc) => acc.phone === payload.phone);
+
+              const existingAccount = old.find((acc) => acc.id === payload.id);
+              const displayPhone = payload.phone || existingAccount?.phone || payload.id;
               if (existingAccount && existingAccount.status !== payload.status) {
                 if (payload.status === "CONNECTED") {
-                  toast.success(`Аккаунт ${payload.phone} подключен`);
+                  toast.success(`Аккаунт ${displayPhone} подключен`);
                 } else if (payload.status === "DISCONNECTED") {
-                  toast.info(`Аккаунт ${payload.phone} отключен`);
+                  toast.info(`Аккаунт ${displayPhone} отключен`);
                 } else if (payload.status === "BANNED") {
-                  toast.error(`Аккаунт ${payload.phone} заблокирован!`);
+                  toast.error(`Аккаунт ${displayPhone} заблокирован!`);
                 }
               }
 
               return old.map((acc) =>
-                acc.phone === payload.phone
+                acc.id === payload.id
                   ? {
                       ...acc,
                       status: payload.status,
+                      phone: payload.phone ?? acc.phone,
                       qr: payload.status === "CONNECTED" ? null : acc.qr
                     }
                   : acc

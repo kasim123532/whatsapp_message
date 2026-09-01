@@ -21,38 +21,45 @@ class WhatsAppManager {
 
     console.log(`[WhatsApp] Auto-connecting ${activeAccounts.length} accounts...`);
     for (const acc of activeAccounts) {
-      this.connect(acc.phone).catch((err) => {
-        console.error(`[WhatsApp] Failed to auto-connect ${acc.phone}:`, err);
+      this.connect(acc.id).catch((err) => {
+        console.error(`[WhatsApp] Failed to auto-connect ${acc.id}:`, err);
       });
     }
   }
 
-  getClient(phone: string): Client | undefined {
-    return this.clients.get(phone);
+  getClient(id: string): Client | undefined {
+    return this.clients.get(id);
   }
 
-  getQr(phone: string): string | undefined {
-    return this.qrs.get(phone);
+  getQr(id: string): string | undefined {
+    return this.qrs.get(id);
   }
 
-  async connect(phone: string): Promise<Client> {
-    if (this.clients.has(phone)) {
-      console.log(`[WhatsApp] Client already exists for ${phone}`);
-      return this.clients.get(phone)!;
+  async connect(id: string): Promise<Client> {
+    if (this.clients.has(id)) {
+      console.log(`[WhatsApp] Client already exists for ${id}`);
+      return this.clients.get(id)!;
     }
 
-    console.log(`[WhatsApp] Connecting client for ${phone}...`);
+    const account = await prisma.account.findUnique({ where: { id } });
+    if (!account) {
+      throw new Error("Account not found");
+    }
+
+    console.log(`[WhatsApp] Connecting client for ${id}...`);
     await prisma.account.updateMany({
-      where: { phone },
+      where: { id },
       data: { status: "CONNECTING" }
     });
-    whatsappEvents.emit("status", { phone, status: "CONNECTING" });
+    whatsappEvents.emit("status", { id, status: "CONNECTING" });
 
     const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 
+    // Identity for the WhatsApp session is the account's own id, not its phone
+    // number — the phone number isn't known until the QR code is scanned.
     const client = new Client({
       authStrategy: new LocalAuth({
-        clientId: phone,
+        clientId: id,
         dataPath: path.resolve("./sessions")
       }),
       puppeteer: {
@@ -71,106 +78,120 @@ class WhatsAppManager {
       }
     });
 
-    this.clients.set(phone, client);
+    this.clients.set(id, client);
 
     client.on("qr", async (qrString) => {
-      console.log(`[WhatsApp] QR code generated for ${phone}`);
+      console.log(`[WhatsApp] QR code generated for ${id}`);
       try {
         const qrDataUrl = await qrcode.toDataURL(qrString);
-        this.qrs.set(phone, qrDataUrl);
-        whatsappEvents.emit("qr", { phone, qr: qrDataUrl });
+        this.qrs.set(id, qrDataUrl);
+        whatsappEvents.emit("qr", { id, qr: qrDataUrl });
       } catch (err) {
         console.error("[WhatsApp] Error generating QR Data URL:", err);
       }
     });
 
     client.on("ready", async () => {
-      console.log(`[WhatsApp] Client is ready for ${phone}`);
-      this.qrs.delete(phone);
-      
+      console.log(`[WhatsApp] Client is ready for ${id}`);
+      this.qrs.delete(id);
+
       const whatsappInfo = client.info;
       const connectedName = whatsappInfo?.pushname || "WhatsApp Account";
+      const realPhone = whatsappInfo?.wid?.user || null;
 
-      await prisma.account.updateMany({
-        where: { phone },
-        data: { status: "CONNECTED", name: connectedName }
-      });
+      try {
+        await prisma.account.update({
+          where: { id },
+          data: {
+            status: "CONNECTED",
+            name: connectedName,
+            ...(realPhone ? { phone: realPhone } : {})
+          }
+        });
+      } catch (err) {
+        // Most likely the discovered phone number already belongs to another account.
+        console.error(`[WhatsApp] Could not save phone number for ${id}:`, err);
+        await prisma.account.updateMany({
+          where: { id },
+          data: { status: "CONNECTED", name: connectedName }
+        });
+      }
 
-      whatsappEvents.emit("status", { phone, status: "CONNECTED" });
-      whatsappEvents.emit("ready", { phone });
+      whatsappEvents.emit("status", { id, status: "CONNECTED", phone: realPhone });
+      whatsappEvents.emit("ready", { id });
     });
 
     client.on("auth_failure", async (msg) => {
-      console.error(`[WhatsApp] Auth failure for ${phone}:`, msg);
-      this.qrs.delete(phone);
-      await this.destroyClient(phone);
+      console.error(`[WhatsApp] Auth failure for ${id}:`, msg);
+      this.qrs.delete(id);
+      await this.destroyClient(id);
       await prisma.account.updateMany({
-        where: { phone },
+        where: { id },
         data: { status: "DISCONNECTED" }
       });
-      whatsappEvents.emit("status", { phone, status: "DISCONNECTED" });
+      whatsappEvents.emit("status", { id, status: "DISCONNECTED" });
     });
 
     client.on("disconnected", async (reason) => {
-      console.log(`[WhatsApp] Client disconnected for ${phone}:`, reason);
-      this.qrs.delete(phone);
-      await this.destroyClient(phone);
+      console.log(`[WhatsApp] Client disconnected for ${id}:`, reason);
+      this.qrs.delete(id);
+      await this.destroyClient(id);
       await prisma.account.updateMany({
-        where: { phone },
+        where: { id },
         data: { status: "DISCONNECTED" }
       });
-      whatsappEvents.emit("status", { phone, status: "DISCONNECTED" });
+      whatsappEvents.emit("status", { id, status: "DISCONNECTED" });
     });
 
     client.initialize().catch(async (err) => {
-      console.error(`[WhatsApp] Initialization error for ${phone}:`, err);
-      this.qrs.delete(phone);
-      await this.destroyClient(phone);
+      console.error(`[WhatsApp] Initialization error for ${id}:`, err);
+      this.qrs.delete(id);
+      await this.destroyClient(id);
       await prisma.account.updateMany({
-        where: { phone },
+        where: { id },
         data: { status: "DISCONNECTED" }
       });
-      whatsappEvents.emit("status", { phone, status: "DISCONNECTED" });
+      whatsappEvents.emit("status", { id, status: "DISCONNECTED" });
     });
 
     return client;
   }
 
-  async disconnect(phone: string): Promise<void> {
-    console.log(`[WhatsApp] Disconnecting client for ${phone}...`);
-    this.qrs.delete(phone);
-    await this.destroyClient(phone);
+  async disconnect(id: string): Promise<void> {
+    console.log(`[WhatsApp] Disconnecting client for ${id}...`);
+    this.qrs.delete(id);
+    await this.destroyClient(id);
     await prisma.account.updateMany({
-      where: { phone },
+      where: { id },
       data: { status: "DISCONNECTED" }
     });
-    whatsappEvents.emit("status", { phone, status: "DISCONNECTED" });
+    whatsappEvents.emit("status", { id, status: "DISCONNECTED" });
   }
 
-  async deleteAccount(phone: string): Promise<void> {
-    console.log(`[WhatsApp] Deleting account and sessions for ${phone}...`);
-    await this.disconnect(phone);
-    
+  async deleteAccount(id: string): Promise<void> {
+    console.log(`[WhatsApp] Deleting account and sessions for ${id}...`);
+    await this.disconnect(id);
+
     // Remove LocalAuth session dir
-    const sessionDir = path.resolve("./sessions", `session-${phone}`);
+    const sessionDir = path.resolve("./sessions", `session-${id}`);
     if (fs.existsSync(sessionDir)) {
       try {
         fs.rmSync(sessionDir, { recursive: true, force: true });
-        console.log(`[WhatsApp] Removed session folder for ${phone}`);
+        console.log(`[WhatsApp] Removed session folder for ${id}`);
       } catch (err) {
-        console.error(`[WhatsApp] Failed to delete session folder for ${phone}:`, err);
+        console.error(`[WhatsApp] Failed to delete session folder for ${id}:`, err);
       }
     }
   }
 
-  private async destroyClient(phone: string) {
-    const client = this.clients.get(phone);
+  private async destroyClient(id: string) {
+    const client = this.clients.get(id);
     if (client) {
-      this.clients.delete(phone);
+      this.clients.delete(id);
       try {
         await client.destroy();
       } catch (e) {
-        console.error(`[WhatsApp] Error destroying client ${phone}:`, e);
+        console.error(`[WhatsApp] Error destroying client ${id}:`, e);
       }
     }
   }

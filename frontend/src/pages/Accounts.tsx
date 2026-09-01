@@ -15,8 +15,8 @@ import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
 import { WhatsAppProfile } from "@/types";
 
-function getAvatarNumber(phone: string) {
-  return phone.slice(-2);
+function getAvatarNumber(phone: string | null, id: string) {
+  return (phone || id).slice(-2);
 }
 
 const Accounts = () => {
@@ -25,9 +25,8 @@ const Accounts = () => {
   const [addOpen, setAddOpen] = useState(false);
   const [limitOpen, setLimitOpen] = useState(false);
   const [qrDialogOpen, setQrDialogOpen] = useState(false);
-  const [activeQrPhone, setActiveQrPhone] = useState<string | null>(null);
+  const [activeQrId, setActiveQrId] = useState<string | null>(null);
 
-  const [newPhone, setNewPhone] = useState("");
   const [newName, setNewName] = useState("");
   const [newProxy, setNewProxy] = useState("");
   const [dayLimit, setDayLimit] = useState("");
@@ -41,7 +40,7 @@ const Accounts = () => {
 
   // Mutations
   const addMutation = useMutation({
-    mutationFn: (data: { phone: string; name?: string; proxy?: string }) =>
+    mutationFn: (data: { name?: string; proxy?: string }) =>
       apiRequest("/accounts", {
         method: "POST",
         body: JSON.stringify(data)
@@ -49,13 +48,12 @@ const Accounts = () => {
     onSuccess: (newProfile) => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
       setAddOpen(false);
-      setNewPhone("");
       setNewName("");
       setNewProxy("");
       toast.success("Профиль успешно создан");
-      
+
       // Auto initiate connection
-      connectMutation.mutate(newProfile.phone);
+      connectMutation.mutate(newProfile.id);
     },
     onError: (err: any) => {
       toast.error(err.message || "Ошибка добавления аккаунта");
@@ -63,11 +61,11 @@ const Accounts = () => {
   });
 
   const connectMutation = useMutation({
-    mutationFn: (phone: string) =>
-      apiRequest(`/accounts/${phone}/connect`, { method: "POST" }),
-    onSuccess: (_, phone) => {
+    mutationFn: (id: string) =>
+      apiRequest(`/accounts/${id}/connect`, { method: "POST" }),
+    onSuccess: (_, id) => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
-      setActiveQrPhone(phone);
+      setActiveQrId(id);
       setQrDialogOpen(true);
       toast.info("Инициализация подключения...");
     },
@@ -77,8 +75,8 @@ const Accounts = () => {
   });
 
   const disconnectMutation = useMutation({
-    mutationFn: (phone: string) =>
-      apiRequest(`/accounts/${phone}/disconnect`, { method: "POST" }),
+    mutationFn: (id: string) =>
+      apiRequest(`/accounts/${id}/disconnect`, { method: "POST" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
       toast.success("Сессия закрыта");
@@ -118,18 +116,23 @@ const Accounts = () => {
     }
   });
 
-  const activeProfileForQr = profiles.find((p) => p.phone === activeQrPhone);
+  const activeProfileForQr = profiles.find((p) => p.id === activeQrId);
+  const activeQrLink = activeQrId ? `${window.location.origin}/connect/${activeQrId}` : "";
 
   const onlineCount = profiles.filter((p) => p.status === "CONNECTED").length;
   const banCount = profiles.filter((p) => p.status === "BANNED").length;
 
   const handleAdd = () => {
-    if (!newPhone.trim()) return;
     addMutation.mutate({
-      phone: newPhone.trim(),
       name: newName.trim(),
       proxy: newProxy.trim()
     });
+  };
+
+  const copyInviteLink = () => {
+    if (!activeQrLink) return;
+    navigator.clipboard.writeText(activeQrLink);
+    toast.success("Ссылка скопирована");
   };
 
   const handleSetLimit = () => {
@@ -290,12 +293,12 @@ const Accounts = () => {
                           onCheckedChange={() => toggleOne(p.id)}
                         />
                         <div className="h-10 w-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-display font-bold text-sm shrink-0">
-                          {getAvatarNumber(p.phone)}
+                          {getAvatarNumber(p.phone, p.id)}
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium truncate">
-                              +{p.phone}
+                              {p.phone ? `+${p.phone}` : "Ожидание сканирования QR"}
                               {p.name && ` (${p.name})`}
                             </span>
                           </div>
@@ -315,7 +318,7 @@ const Accounts = () => {
                             variant="ghost"
                             size="sm"
                             className="h-7 text-xs px-2 text-muted-foreground"
-                            onClick={() => disconnectMutation.mutate(p.phone)}
+                            onClick={() => disconnectMutation.mutate(p.id)}
                           >
                             <WifiOff className="h-3 w-3 mr-1" /> Выйти
                           </Button>
@@ -324,19 +327,19 @@ const Accounts = () => {
                             variant="outline"
                             size="sm"
                             className="h-7 text-xs px-2 border-wa-green/30 text-wa-green hover:bg-wa-green/10"
-                            onClick={() => connectMutation.mutate(p.phone)}
+                            onClick={() => connectMutation.mutate(p.id)}
                             disabled={p.status === "CONNECTING"}
                           >
                             <Wifi className="h-3 w-3 mr-1" /> Войти
                           </Button>
                         )}
-                        {p.status === "CONNECTING" && p.qr && (
+                        {p.status === "CONNECTING" && (
                           <Button
                             variant="link"
                             size="sm"
                             className="h-7 text-xs text-primary px-1"
                             onClick={() => {
-                              setActiveQrPhone(p.phone);
+                              setActiveQrId(p.id);
                               setQrDialogOpen(true);
                             }}
                           >
@@ -368,18 +371,10 @@ const Accounts = () => {
           <DialogHeader>
             <DialogTitle>Добавить WhatsApp профиль</DialogTitle>
             <DialogDescription>
-              Введите номер телефона и данные, затем отсканируйте QR-код.
+              Номер телефона вводить не нужно — он определится автоматически после сканирования QR-кода.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-xs font-semibold">Номер телефона (без +)</label>
-              <Input
-                placeholder="77053975328"
-                value={newPhone}
-                onChange={(e) => setNewPhone(e.target.value)}
-              />
-            </div>
             <div className="space-y-2">
               <label className="text-xs font-semibold">Имя профиля (для себя)</label>
               <Input
@@ -436,6 +431,14 @@ const Accounts = () => {
               <p>1. Откройте WhatsApp на телефоне.</p>
               <p>2. Нажмите Меню (три точки) или Настройки &rarr; Связанные устройства.</p>
               <p>3. Нажмите "Привязка устройства" и наведите на этот код.</p>
+            </div>
+            <div className="mt-2 w-full">
+              <p className="text-xs text-muted-foreground text-center mb-1">
+                Подключает чужой WhatsApp? Отправьте ссылку — тот же QR откроется у него.
+              </p>
+              <Button variant="outline" size="sm" className="w-full" onClick={copyInviteLink}>
+                Скопировать ссылку для отправки
+              </Button>
             </div>
           </div>
           <DialogFooter>

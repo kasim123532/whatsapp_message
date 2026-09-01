@@ -115,11 +115,11 @@ class CampaignScheduler {
       return;
     }
 
-    // Filter connected clients
-    const connectedSenders = senderPhones.filter(phone => {
-      const client = wsManager.getClient(phone);
-      return client !== undefined; // In a production environment, we should also check if the client is authenticated/ready
+    // Resolve sender phone numbers to account records, then filter to ones with a live client
+    const senderAccounts = await prisma.account.findMany({
+      where: { phone: { in: senderPhones }, status: "CONNECTED" }
     });
+    const connectedSenders = senderAccounts.filter(acc => wsManager.getClient(acc.id) !== undefined);
 
     if (connectedSenders.length === 0) {
       console.warn(`[Scheduler] No connected WhatsApp profiles available for campaign "${campaign.name}". Senders: ${senderPhones.join(", ")}`);
@@ -128,8 +128,9 @@ class CampaignScheduler {
     }
 
     // Select a sender (randomly select one of the connected profiles to spread load)
-    const selectedSenderPhone = connectedSenders[Math.floor(Math.random() * connectedSenders.length)];
-    const client = wsManager.getClient(selectedSenderPhone)!;
+    const selectedSender = connectedSenders[Math.floor(Math.random() * connectedSenders.length)];
+    const selectedSenderPhone = selectedSender.phone!;
+    const client = wsManager.getClient(selectedSender.id)!;
 
     // 5. Build message content by replacing variables
     let finalMessage = campaign.message;

@@ -9,7 +9,7 @@ generator client {
 
 model Account {
   id         String   @id @default(uuid())
-  phone      String   @unique
+  phone      String?  @unique
   name       String?
   proxy      String?
   status     String   @default("DISCONNECTED") // "DISCONNECTED", "CONNECTING", "CONNECTED", "BANNED"

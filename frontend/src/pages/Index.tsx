@@ -158,7 +158,7 @@ const Index = () => {
                               "h-4 w-4", 
                               acc.status === "CONNECTED" ? "text-wa-green" : "text-muted-foreground"
                             )} />
-                            <span className="font-medium">+{acc.phone}</span>
+                            <span className="font-medium">{acc.phone ? `+${acc.phone}` : "Ожидание QR"}</span>
                           </div>
                           <span className={cn(
                             "text-[10px] font-bold",

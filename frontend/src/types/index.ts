@@ -1,6 +1,6 @@
 export interface WhatsAppProfile {
   id: string;
-  phone: string;
+  phone: string | null;
   name: string;
   proxy: string;
   status: "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "BANNED";

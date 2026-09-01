@@ -11,7 +11,7 @@ router.get("/", async (req, res) => {
     // Add current QR code to response if client is generating it
     const accountsWithQr = accounts.map((acc) => ({
       ...acc,
-      qr: wsManager.getQr(acc.phone) || null
+      qr: wsManager.getQr(acc.id) || null
     }));
     res.json(accountsWithQr);
   } catch (err: any) {
@@ -19,23 +19,41 @@ router.get("/", async (req, res) => {
   }
 });
 
-// POST create account
-router.post("/", async (req, res) => {
-  const { phone, name, proxy } = req.body;
-  if (!phone) {
-    return res.status(400).json({ error: "Phone number is required" });
+// GET single account (minimal, public-safe) — used by the shareable /connect/:id link
+router.get("/:id/status", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const account = await prisma.account.findUnique({ where: { id } });
+    if (!account) {
+      return res.status(404).json({ error: "Ссылка недействительна: аккаунт не найден" });
+    }
+    res.json({
+      id: account.id,
+      phone: account.phone,
+      name: account.name,
+      status: account.status,
+      qr: wsManager.getQr(id) || null
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
+});
 
-  // Clean phone number (leave only digits)
-  const cleanPhone = phone.replace(/\D/g, "");
+// POST create account — phone number is optional, it's discovered automatically
+// once the QR code is scanned.
+router.post("/", async (req, res) => {
+  const { phone, name, proxy } = req.body || {};
 
   try {
-    const existing = await prisma.account.findUnique({
-      where: { phone: cleanPhone }
-    });
-
-    if (existing) {
-      return res.status(400).json({ error: "Account with this phone already exists" });
+    let cleanPhone: string | null = null;
+    if (phone && String(phone).trim()) {
+      cleanPhone = String(phone).replace(/\D/g, "");
+      const existing = await prisma.account.findUnique({
+        where: { phone: cleanPhone }
+      });
+      if (existing) {
+        return res.status(400).json({ error: "Account with this phone already exists" });
+      }
     }
 
     const account = await prisma.account.create({
@@ -62,7 +80,7 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ error: "Account not found" });
     }
 
-    await wsManager.deleteAccount(account.phone);
+    await wsManager.deleteAccount(id);
     await prisma.account.delete({ where: { id } });
 
     res.json({ message: "Account deleted successfully" });
@@ -71,19 +89,18 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-// POST connect account
-router.post("/:phone/connect", async (req, res) => {
-  const { phone } = req.params;
+// POST connect account — also used by the public /connect/:id page
+router.post("/:id/connect", async (req, res) => {
+  const { id } = req.params;
   try {
-    // Check if account exists
-    const account = await prisma.account.findUnique({ where: { phone } });
+    const account = await prisma.account.findUnique({ where: { id } });
     if (!account) {
       return res.status(404).json({ error: "Account not found in database" });
     }
 
     // Trigger connection in background (async)
-    wsManager.connect(phone).catch(err => {
-      console.error(`Error connecting to phone ${phone}:`, err);
+    wsManager.connect(id).catch(err => {
+      console.error(`Error connecting account ${id}:`, err);
     });
 
     res.json({ message: "Connecting initiated", status: "CONNECTING" });
@@ -93,10 +110,10 @@ router.post("/:phone/connect", async (req, res) => {
 });
 
 // POST disconnect account
-router.post("/:phone/disconnect", async (req, res) => {
-  const { phone } = req.params;
+router.post("/:id/disconnect", async (req, res) => {
+  const { id } = req.params;
   try {
-    await wsManager.disconnect(phone);
+    await wsManager.disconnect(id);
     res.json({ message: "Disconnected successfully", status: "DISCONNECTED" });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

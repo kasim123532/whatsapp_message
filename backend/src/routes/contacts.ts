@@ -181,7 +181,7 @@ router.post("/contacts/:id/check-whatsapp", async (req, res) => {
       return res.status(400).json({ error: "No connected WhatsApp accounts found to perform verification" });
     }
 
-    const client = wsManager.getClient(accounts[0].phone);
+    const client = wsManager.getClient(accounts[0].id);
     if (!client) {
       return res.status(400).json({ error: "WhatsApp service for account is not initialized or ready" });
     }
