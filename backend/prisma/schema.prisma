@@ -19,6 +19,12 @@ model Account {
   createdAt  DateTime @default(now())
 }
 
+model Proxy {
+  id        String   @id @default(uuid())
+  value     String   @unique // raw proxy string, e.g. host:port or host:port:user:pass
+  createdAt DateTime @default(now())
+}
+
 model ContactGroup {
   id        String     @id @default(uuid())
   name      String

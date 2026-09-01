@@ -9,6 +9,7 @@ import accountsRouter from "./routes/accounts.js";
 import contactsRouter from "./routes/contacts.js";
 import templatesRouter from "./routes/templates.js";
 import campaignsRouter from "./routes/campaigns.js";
+import proxiesRouter from "./routes/proxies.js";
 
 dotenv.config();
 
@@ -23,6 +24,7 @@ app.use("/api/accounts", accountsRouter);
 app.use("/api/contacts", contactsRouter);
 app.use("/api/templates", templatesRouter);
 app.use("/api/campaigns", campaignsRouter);
+app.use("/api/proxies", proxiesRouter);
 
 // Health check endpoint
 app.get("/health", (req, res) => {

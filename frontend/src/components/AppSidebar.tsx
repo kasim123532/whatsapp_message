@@ -1,4 +1,4 @@
-import { Users, MessageSquareText, Send, LayoutDashboard, Settings } from "lucide-react";
+import { Users, MessageSquareText, Send, LayoutDashboard, Settings, QrCode } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import {
@@ -21,6 +21,7 @@ const mainItems = [
   { title: "Контакты", url: "/contacts", icon: Users },
   { title: "Шаблоны", url: "/templates", icon: MessageSquareText },
   { title: "Рассылки", url: "/campaigns", icon: Send },
+  { title: "QR по прокси", url: "/qr", icon: QrCode },
 ];
 
 export function AppSidebar() {

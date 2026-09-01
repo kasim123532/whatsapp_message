@@ -52,6 +52,12 @@ export interface Campaign {
   status: string;
 }
 
+export interface Proxy {
+  id: string;
+  value: string;
+  createdAt: string;
+}
+
 export interface Template {
   id: string;
   name: string;

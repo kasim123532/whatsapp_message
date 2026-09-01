@@ -9,6 +9,7 @@ import Accounts from "./pages/Accounts";
 import Contacts from "./pages/Contacts";
 import Templates from "./pages/Templates";
 import Campaigns from "./pages/Campaigns";
+import QrGenerator from "./pages/QrGenerator";
 import ConnectAccount from "./pages/ConnectAccount";
 import NotFound from "./pages/NotFound";
 
@@ -27,6 +28,7 @@ const App = () => (
             <Route path="/contacts" element={<Contacts />} />
             <Route path="/templates" element={<Templates />} />
             <Route path="/campaigns" element={<Campaigns />} />
+            <Route path="/qr" element={<QrGenerator />} />
             <Route path="/connect/:id" element={<ConnectAccount />} />
             <Route path="*" element={<NotFound />} />
           </Routes>

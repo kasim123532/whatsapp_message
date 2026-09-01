@@ -55,6 +55,29 @@ class WhatsAppManager {
 
     const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 
+    const puppeteerArgs = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-gpu"
+    ];
+
+    // Proxy string format: host:port or host:port:username:password
+    let proxyAuthentication: { username: string; password: string } | undefined;
+    if (account.proxy) {
+      const [host, port, username, password] = account.proxy.split(":").map((p) => p.trim());
+      if (host && port) {
+        puppeteerArgs.push(`--proxy-server=${host}:${port}`);
+        if (username && password) {
+          proxyAuthentication = { username, password };
+        }
+      }
+    }
+
     // Identity for the WhatsApp session is the account's own id, not its phone
     // number — the phone number isn't known until the QR code is scanned.
     const client = new Client({
@@ -62,19 +85,11 @@ class WhatsAppManager {
         clientId: id,
         dataPath: path.resolve("./sessions")
       }),
+      ...(proxyAuthentication ? { proxyAuthentication } : {}),
       puppeteer: {
         headless: true,
         executablePath: chromePath,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-accelerated-2d-canvas",
-          "--no-first-run",
-          "--no-zygote",
-          "--single-process",
-          "--disable-gpu"
-        ]
+        args: puppeteerArgs
       }
     });
 
