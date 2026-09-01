@@ -44,4 +44,4 @@ COPY prisma ./prisma/
 EXPOSE 5000
 
 # Start server
-CMD ["node", "dist/server.js"]
+CMD ["sh", "-c", "npx prisma db push && node dist/server.js"]

@@ -20,26 +20,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
-
-interface Campaign {
-  id: string;
-  name: string;
-  phone: string[]; // Sender phones
-  message: string;
-  group: string; // Subgroup name
-  groupId: string; // Subgroup ID
-  nextAction: string | null;
-  nextActionTime: string;
-  sent: number;
-  pending: number;
-  failed: number;
-  isPaused: boolean;
-  minInterval?: number;
-  maxInterval?: number;
-  sendFrom?: string;
-  sendTo?: string;
-  status: string;
-}
+import { Campaign } from "@/types";
 
 const SubgroupVariableInfo = ({
   variables,

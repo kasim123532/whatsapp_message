@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -11,21 +11,9 @@ import { Badge } from "@/components/ui/badge";
 import { MessageCircle, Plus, Settings, UserCog, Trash2, Loader2, Wifi, WifiOff } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest, WS_URL } from "@/lib/api";
+import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
-
-interface WhatsAppProfile {
-  id: string;
-  phone: string;
-  name: string;
-  proxy: string;
-  status: "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "BANNED";
-  todaySent: number;
-  dailyLimit: number;
-  totalSent: number;
-  qr?: string | null;
-  selected?: boolean;
-}
+import { WhatsAppProfile } from "@/types";
 
 function getAvatarNumber(phone: string) {
   return phone.slice(-2);
@@ -50,54 +38,6 @@ const Accounts = () => {
     queryKey: ["accounts"],
     queryFn: () => apiRequest("/accounts")
   });
-
-  // 2. WebSocket listener for real-time QR and Status updates
-  useEffect(() => {
-    const ws = new WebSocket(WS_URL);
-
-    ws.onopen = () => {
-      console.log("[WS] Connected to backend");
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === "qr") {
-          queryClient.setQueryData<WhatsAppProfile[]>(["accounts"], (old) => {
-            if (!old) return old;
-            return old.map((acc) =>
-              acc.phone === payload.phone
-                ? { ...acc, qr: payload.qr, status: "CONNECTING" }
-                : acc
-            );
-          });
-        } else if (payload.type === "status") {
-          queryClient.setQueryData<WhatsAppProfile[]>(["accounts"], (old) => {
-            if (!old) return old;
-            return old.map((acc) =>
-              acc.phone === payload.phone
-                ? {
-                    ...acc,
-                    status: payload.status,
-                    qr: payload.status === "CONNECTED" ? null : acc.qr
-                  }
-                : acc
-            );
-          });
-        }
-      } catch (err) {
-        console.error("WS Message error:", err);
-      }
-    };
-
-    ws.onclose = () => {
-      console.log("[WS] Disconnected from backend");
-    };
-
-    return () => {
-      ws.close();
-    };
-  }, [queryClient]);
 
   // Mutations
   const addMutation = useMutation({

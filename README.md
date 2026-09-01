@@ -87,11 +87,11 @@ docker-compose up --build -d
 
 This will build and start:
 - **Backend API & WhatsApp service** (internal, exposed on port `5000`)
-- **Frontend SPA served via Nginx** (exposed on port `8080`)
+- **Frontend SPA served via Nginx** (exposed on port `4628`)
 
 ### 3. Accessing the Dashboard
 Open your browser and navigate to:
-`http://<your-server-ip>:8080` (or `http://localhost:8080` if running locally).
+`http://<your-server-ip>:4628` (or `http://localhost:4628` if running locally).
 
 ### 4. Customizing Port
 If you want to run the app on port `80` (default web port), edit the `docker-compose.yml` file and change the port mapping for the frontend service:

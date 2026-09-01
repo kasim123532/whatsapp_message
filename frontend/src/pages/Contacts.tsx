@@ -15,27 +15,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
-
-interface Contact {
-  id: string;
-  name: string;
-  phone: string;
-  variables: Record<string, string>;
-  whatsappStatus?: "unknown" | "checking" | "exists" | "not_found";
-}
-
-interface SubGroup {
-  id: string;
-  name: string;
-  contacts: Contact[];
-}
-
-interface ContactGroup {
-  id: string;
-  name: string;
-  subGroups: SubGroup[];
-  expanded: boolean;
-}
+import { Contact, SubGroup, ContactGroup } from "@/types";
 
 const Contacts = () => {
   const queryClient = useQueryClient();

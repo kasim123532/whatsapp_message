@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
+import { ContactGroup, Template, Campaign, WhatsAppProfile, SubGroup } from "@/types";
 
 const statusMap: Record<string, { label: string; className: string }> = {
   COMPLETED: { label: "Завершена", className: "bg-accent text-accent-foreground" },
@@ -15,22 +16,22 @@ const statusMap: Record<string, { label: string; className: string }> = {
 
 const Index = () => {
   // Queries to load dashboard data
-  const { data: contactGroups = [], isLoading: isContactsLoading } = useQuery<any[]>({
+  const { data: contactGroups = [], isLoading: isContactsLoading } = useQuery<ContactGroup[]>({
     queryKey: ["contactGroups"],
     queryFn: () => apiRequest("/contacts/groups")
   });
 
-  const { data: templates = [], isLoading: isTemplatesLoading } = useQuery<any[]>({
+  const { data: templates = [], isLoading: isTemplatesLoading } = useQuery<Template[]>({
     queryKey: ["templates"],
     queryFn: () => apiRequest("/templates")
   });
 
-  const { data: campaigns = [], isLoading: isCampaignsLoading } = useQuery<any[]>({
+  const { data: campaigns = [], isLoading: isCampaignsLoading } = useQuery<Campaign[]>({
     queryKey: ["campaigns"],
     queryFn: () => apiRequest("/campaigns")
   });
 
-  const { data: accounts = [], isLoading: isAccountsLoading } = useQuery<any[]>({
+  const { data: accounts = [], isLoading: isAccountsLoading } = useQuery<WhatsAppProfile[]>({
     queryKey: ["accounts"],
     queryFn: () => apiRequest("/accounts")
   });
@@ -39,7 +40,7 @@ const Index = () => {
 
   // Calculators
   const totalContacts = contactGroups.reduce(
-    (acc, g) => acc + g.subGroups.reduce((a: number, sg: any) => a + sg.contacts.length, 0),
+    (acc, g) => acc + g.subGroups.reduce((a: number, sg: SubGroup) => a + sg.contacts.length, 0),
     0
   );
 

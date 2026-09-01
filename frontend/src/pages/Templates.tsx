@@ -12,13 +12,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
-
-interface Template {
-  id: string;
-  name: string;
-  body: string;
-  variables: string[];
-}
+import { Template } from "@/types";
 
 const extractVars = (text: string) => {
   const matches = text.match(/\{\{(\w+)\}\}/g);
