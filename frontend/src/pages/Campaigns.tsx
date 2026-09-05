@@ -7,14 +7,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Calendar } from "@/components/ui/calendar";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
-import { format } from "date-fns";
 import { Badge } from "@/components/ui/badge";
-import { ru } from "date-fns/locale";
-import { Plus, CalendarIcon, Pause, Play, Trash2, MoreVertical, Download, Copy, Pencil, Archive, Loader2 } from "lucide-react";
+import { Plus, Pause, Play, Trash2, MoreVertical, Download, Copy, Pencil, Archive, Loader2 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -64,11 +60,11 @@ const Campaigns = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [form, setForm] = useState({
-    name: "", phones: [] as string[], message: "", groupId: "", date: undefined as Date | undefined, time: "08:00",
+    name: "", phones: [] as string[], message: "", groupId: "",
     minInterval: "60", maxInterval: "120", sendFrom: "08:00", sendTo: "20:00",
   });
   const [editForm, setEditForm] = useState({
-    name: "", phones: [] as string[], message: "", groupId: "", date: undefined as Date | undefined, time: "08:00",
+    name: "", phones: [] as string[], message: "",
     minInterval: "60", maxInterval: "120", sendFrom: "08:00", sendTo: "20:00",
   });
 
@@ -131,6 +127,23 @@ const Campaigns = () => {
     }
   });
 
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: any }) =>
+      apiRequest(`/campaigns/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(data)
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      setEditDialogOpen(false);
+      setEditingId(null);
+      toast.success("Рассылка обновлена");
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Ошибка обновления рассылки");
+    }
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiRequest(`/campaigns/${id}`, { method: "DELETE" }),
     onSuccess: (_, id) => {
@@ -158,6 +171,13 @@ const Campaigns = () => {
       return;
     }
 
+    const min = parseInt(form.minInterval);
+    const max = parseInt(form.maxInterval);
+    if (Number.isNaN(min) || Number.isNaN(max) || min <= 0 || max <= 0 || min > max) {
+      toast.error("Мин. интервал должен быть положительным и не больше макс. интервала");
+      return;
+    }
+
     createMutation.mutate({
       name: form.name,
       phones: form.phones,
@@ -176,9 +196,6 @@ const Campaigns = () => {
       name: c.name,
       phones: c.phone,
       message: c.message,
-      groupId: c.groupId,
-      date: c.nextAction ? new Date(c.nextAction) : undefined,
-      time: c.nextActionTime,
       minInterval: String(c.minInterval || 60),
       maxInterval: String(c.maxInterval || 120),
       sendFrom: c.sendFrom || "08:00",
@@ -188,13 +205,36 @@ const Campaigns = () => {
   };
 
   const handleEdit = () => {
-    // Currently editing is mocked in the same edit mutation or simple toast.
-    // In a fully developed app, edit would hit PUT /api/campaigns/:id. For this setup we will log
-    toast.info("Функция редактирования сохраняется локально.");
-    setEditDialogOpen(false);
+    if (!editingId) return;
+
+    if (!editForm.name || editForm.phones.length === 0 || !editForm.message) {
+      toast.error("Заполните все обязательные поля");
+      return;
+    }
+
+    const min = parseInt(editForm.minInterval);
+    const max = parseInt(editForm.maxInterval);
+    if (Number.isNaN(min) || Number.isNaN(max) || min <= 0 || max <= 0 || min > max) {
+      toast.error("Мин. интервал должен быть положительным и не больше макс. интервала");
+      return;
+    }
+
+    updateMutation.mutate({
+      id: editingId,
+      data: {
+        name: editForm.name,
+        phones: editForm.phones,
+        message: editForm.message,
+        minInterval: min,
+        maxInterval: max,
+        sendFrom: editForm.sendFrom,
+        sendTo: editForm.sendTo
+      }
+    });
   };
 
-  const selectedCampaignId = selectedId || (campaigns.length > 0 ? campaigns[0].id : null);
+  const selectedExists = selectedId !== null && campaigns.some((c) => c.id === selectedId);
+  const selectedCampaignId = selectedExists ? selectedId : (campaigns.length > 0 ? campaigns[0].id : null);
   const selected = campaigns.find((c) => c.id === selectedCampaignId) || null;
 
   const total = (c: Campaign) => c.sent + c.pending + c.failed;
@@ -511,6 +551,33 @@ const Campaigns = () => {
               <Input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
             </div>
             <div>
+              <Label>Номера телефонов отправителей (из подключенных)</Label>
+              <div className="rounded-md border border-input bg-background p-2 space-y-1 max-h-40 overflow-y-auto">
+                {phoneOptions.map((p) => (
+                  <label key={p} className="flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-muted/50 cursor-pointer text-sm">
+                    <input
+                      type="checkbox"
+                      checked={editForm.phones.includes(p)}
+                      onChange={(e) => {
+                        setEditForm(f => ({
+                          ...f,
+                          phones: e.target.checked ? [...f.phones, p] : f.phones.filter(x => x !== p),
+                        }));
+                      }}
+                      className="rounded border-input"
+                    />
+                    +{p}
+                  </label>
+                ))}
+                {phoneOptions.length === 0 && (
+                  <p className="text-xs text-destructive p-2">Нет подключенных аккаунтов WhatsApp.</p>
+                )}
+              </div>
+              {editForm.phones.length > 0 && (
+                <p className="text-xs text-muted-foreground mt-1">Выбрано отправителей: {editForm.phones.length}</p>
+              )}
+            </div>
+            <div>
               <Label>Текст рассылки</Label>
               <Textarea
                 value={editForm.message}
@@ -518,7 +585,28 @@ const Campaigns = () => {
                 className="min-h-[120px]"
               />
             </div>
-            <Button onClick={handleEdit} className="w-full gradient-primary text-primary-foreground">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Мин. интервал (секунд)</Label>
+                <Input type="number" value={editForm.minInterval} onChange={(e) => setEditForm({ ...editForm, minInterval: e.target.value })} />
+              </div>
+              <div>
+                <Label>Макс. интервал (секунд)</Label>
+                <Input type="number" value={editForm.maxInterval} onChange={(e) => setEditForm({ ...editForm, maxInterval: e.target.value })} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Отправка с:</Label>
+                <Input type="time" value={editForm.sendFrom} onChange={(e) => setEditForm({ ...editForm, sendFrom: e.target.value })} />
+              </div>
+              <div>
+                <Label>Отправка до:</Label>
+                <Input type="time" value={editForm.sendTo} onChange={(e) => setEditForm({ ...editForm, sendTo: e.target.value })} />
+              </div>
+            </div>
+            <Button onClick={handleEdit} disabled={updateMutation.isPending} className="w-full gradient-primary text-primary-foreground">
+              {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               Сохранить изменения
             </Button>
           </div>

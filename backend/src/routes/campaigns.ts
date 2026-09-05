@@ -121,6 +121,65 @@ router.post("/", async (req, res) => {
   }
 });
 
+// PUT update campaign
+router.put("/:id", async (req, res) => {
+  const { id } = req.params;
+  const { name, phones, message, minInterval, maxInterval, sendFrom, sendTo } = req.body;
+
+  if (!name || !phones || !Array.isArray(phones) || phones.length === 0 || !message) {
+    return res.status(400).json({ error: "Missing required fields (name, phones, message)" });
+  }
+
+  const min = parseInt(minInterval);
+  const max = parseInt(maxInterval);
+  if (Number.isNaN(min) || Number.isNaN(max) || min <= 0 || max <= 0 || min > max) {
+    return res.status(400).json({ error: "Min interval must be a positive number no greater than max interval" });
+  }
+
+  try {
+    const existing = await prisma.campaign.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const updated = await prisma.campaign.update({
+      where: { id },
+      data: {
+        name,
+        phones: JSON.stringify(phones),
+        message,
+        minInterval: min,
+        maxInterval: max,
+        sendFrom: sendFrom || existing.sendFrom,
+        sendTo: sendTo || existing.sendTo
+      }
+    });
+
+    res.json({
+      id: updated.id,
+      name: updated.name,
+      phone: phones,
+      message: updated.message,
+      group: updated.groupName,
+      groupId: updated.groupId,
+      nextAction: updated.nextAction,
+      nextActionTime: updated.nextActionTime,
+      sent: updated.sent,
+      pending: updated.pending,
+      failed: updated.failed,
+      isPaused: updated.isPaused,
+      minInterval: updated.minInterval,
+      maxInterval: updated.maxInterval,
+      sendFrom: updated.sendFrom,
+      sendTo: updated.sendTo,
+      status: updated.status
+    });
+  } catch (err: any) {
+    console.error("Error updating campaign:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST start campaign
 router.post("/:id/start", async (req, res) => {
   const { id } = req.params;
