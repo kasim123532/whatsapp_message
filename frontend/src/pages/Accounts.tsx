@@ -7,13 +7,21 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { MessageCircle, Plus, Settings, UserCog, Trash2, Loader2, Wifi, WifiOff } from "lucide-react";
+import { QrDialog } from "@/components/QrDialog";
+import {
+  MessageCircle, Settings, Trash2, Loader2, Wifi, WifiOff, Pencil, LogOut, AlertTriangle,
+} from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
-import { WhatsAppProfile } from "@/types";
+import { Proxy, WhatsAppProfile } from "@/types";
+
+const NO_PROXY = "__none__";
 
 function getAvatarNumber(phone: string | null, id: string) {
   return (phone || id).slice(-2);
@@ -28,14 +36,24 @@ const Accounts = () => {
   const [activeQrId, setActiveQrId] = useState<string | null>(null);
 
   const [newName, setNewName] = useState("");
-  const [newProxy, setNewProxy] = useState("");
+  const [newProxy, setNewProxy] = useState(NO_PROXY);
   const [dayLimit, setDayLimit] = useState("");
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
 
-  // 1. Fetch profiles query
+  // Profile being edited (name / proxy / individual daily limit)
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editProxy, setEditProxy] = useState(NO_PROXY);
+  const [editLimit, setEditLimit] = useState("");
+
   const { data: profiles = [], isLoading } = useQuery<WhatsAppProfile[]>({
     queryKey: ["accounts"],
     queryFn: () => apiRequest("/accounts")
+  });
+
+  const { data: proxies = [] } = useQuery<Proxy[]>({
+    queryKey: ["proxies"],
+    queryFn: () => apiRequest("/proxies")
   });
 
   // Mutations
@@ -45,11 +63,11 @@ const Accounts = () => {
         method: "POST",
         body: JSON.stringify(data)
       }),
-    onSuccess: (newProfile) => {
+    onSuccess: (newProfile: WhatsAppProfile) => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
       setAddOpen(false);
       setNewName("");
-      setNewProxy("");
+      setNewProxy(NO_PROXY);
       toast.success("Профиль успешно создан");
 
       // Auto initiate connection
@@ -57,6 +75,23 @@ const Accounts = () => {
     },
     onError: (err: any) => {
       toast.error(err.message || "Ошибка добавления аккаунта");
+    }
+  });
+
+  const editMutation = useMutation({
+    mutationFn: ({ id, ...data }: { id: string; name: string; proxy: string; dailyLimit: number }) =>
+      apiRequest(`/accounts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    onSuccess: (updated: WhatsAppProfile & { restarted?: boolean }) => {
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      closeEdit();
+      toast.success(
+        updated.restarted
+          ? "Профиль обновлён, сессия перезапускается с новым прокси"
+          : "Профиль обновлён"
+      );
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Ошибка сохранения профиля");
     }
   });
 
@@ -79,10 +114,22 @@ const Accounts = () => {
       apiRequest(`/accounts/${id}/disconnect`, { method: "POST" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
-      toast.success("Сессия закрыта");
+      toast.success("Сессия остановлена, привязка сохранена");
     },
     onError: (err: any) => {
       toast.error(err.message || "Ошибка отключения");
+    }
+  });
+
+  const logoutMutation = useMutation({
+    mutationFn: (id: string) =>
+      apiRequest(`/accounts/${id}/logout`, { method: "POST" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      toast.success("Устройство отвязано, потребуется новый QR");
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Ошибка выхода из аккаунта");
     }
   });
 
@@ -116,8 +163,7 @@ const Accounts = () => {
     }
   });
 
-  const activeProfileForQr = profiles.find((p) => p.id === activeQrId);
-  const activeQrLink = activeQrId ? `${window.location.origin}/connect/${activeQrId}` : "";
+  const activeProfileForQr = profiles.find((p) => p.id === activeQrId) ?? null;
 
   const onlineCount = profiles.filter((p) => p.status === "CONNECTED").length;
   const banCount = profiles.filter((p) => p.status === "BANNED").length;
@@ -125,14 +171,32 @@ const Accounts = () => {
   const handleAdd = () => {
     addMutation.mutate({
       name: newName.trim(),
-      proxy: newProxy.trim()
+      proxy: newProxy === NO_PROXY ? "" : newProxy
     });
   };
 
-  const copyInviteLink = () => {
-    if (!activeQrLink) return;
-    navigator.clipboard.writeText(activeQrLink);
-    toast.success("Ссылка скопирована");
+  const openEdit = (profile: WhatsAppProfile) => {
+    setEditId(profile.id);
+    setEditName(profile.name || "");
+    setEditProxy(profile.proxy || NO_PROXY);
+    setEditLimit(String(profile.dailyLimit ?? 0));
+  };
+
+  const closeEdit = () => {
+    setEditId(null);
+    setEditName("");
+    setEditProxy(NO_PROXY);
+    setEditLimit("");
+  };
+
+  const handleSaveEdit = () => {
+    if (!editId) return;
+    editMutation.mutate({
+      id: editId,
+      name: editName.trim(),
+      proxy: editProxy === NO_PROXY ? "" : editProxy,
+      dailyLimit: parseInt(editLimit, 10) || 0
+    });
   };
 
   const handleSetLimit = () => {
@@ -169,7 +233,15 @@ const Accounts = () => {
   const isAllSelected = profiles.length > 0 && Object.keys(selectedIds).filter(k => selectedIds[k]).length === profiles.length;
   const isSomeSelected = Object.keys(selectedIds).filter(k => selectedIds[k]).length > 0;
 
-  const statusBadge = (status: WhatsAppProfile["status"]) => {
+  // The edit dialog offers the saved proxy list, plus whatever the profile is
+  // already using even when that value was never added to the list.
+  const proxyOptions = (current: string) => {
+    const values = proxies.map((p) => p.value);
+    return current && !values.includes(current) ? [current, ...values] : values;
+  };
+
+  const statusBadge = (profile: WhatsAppProfile) => {
+    const { status } = profile;
     if (status === "CONNECTED") {
       return (
         <Badge className="bg-wa-green/20 text-wa-green border-wa-green/30 hover:bg-wa-green/20 text-[10px] px-1.5 py-0">
@@ -188,6 +260,13 @@ const Accounts = () => {
       return (
         <Badge variant="destructive" className="text-[10px] px-1.5 py-0">
           Banned
+        </Badge>
+      );
+    }
+    if (profile.isDraft) {
+      return (
+        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+          Черновик
         </Badge>
       );
     }
@@ -303,25 +382,43 @@ const Accounts = () => {
                             </span>
                           </div>
                           {p.proxy && (
-                            <span className="text-xs text-muted-foreground block">
+                            <span className="text-xs text-muted-foreground block truncate">
                               Proxy: {p.proxy}
+                            </span>
+                          )}
+                          {p.lastError && p.status !== "CONNECTED" && (
+                            <span className="text-xs text-destructive flex items-center gap-1 mt-0.5">
+                              <AlertTriangle className="h-3 w-3 shrink-0" />
+                              <span className="truncate">{p.lastError}</span>
                             </span>
                           )}
                         </div>
                       </div>
 
                       {/* Connection Buttons */}
-                      <div className="flex items-center gap-2 w-1/4">
-                        {statusBadge(p.status)}
+                      <div className="flex items-center gap-1 w-1/3 justify-start">
+                        {statusBadge(p)}
                         {p.status === "CONNECTED" ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-xs px-2 text-muted-foreground"
-                            onClick={() => disconnectMutation.mutate(p.id)}
-                          >
-                            <WifiOff className="h-3 w-3 mr-1" /> Выйти
-                          </Button>
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs px-2 text-muted-foreground"
+                              onClick={() => disconnectMutation.mutate(p.id)}
+                              title="Остановить сессию, привязка устройства сохранится"
+                            >
+                              <WifiOff className="h-3 w-3 mr-1" /> Стоп
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs px-2 text-destructive hover:text-destructive"
+                              onClick={() => logoutMutation.mutate(p.id)}
+                              title="Отвязать устройство — при следующем входе понадобится новый QR"
+                            >
+                              <LogOut className="h-3 w-3 mr-1" /> Выйти
+                            </Button>
+                          </>
                         ) : (
                           <Button
                             variant="outline"
@@ -346,6 +443,15 @@ const Accounts = () => {
                             QR
                           </Button>
                         )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0 text-muted-foreground"
+                          onClick={() => openEdit(p)}
+                          title="Редактировать профиль"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
                       </div>
 
                       <span className="text-sm text-muted-foreground font-mono w-1/6 text-right">
@@ -385,11 +491,24 @@ const Accounts = () => {
             </div>
             <div className="space-y-2">
               <label className="text-xs font-semibold">Proxy (опционально)</label>
-              <Input
-                placeholder="http://user:pass@ip:port"
-                value={newProxy}
-                onChange={(e) => setNewProxy(e.target.value)}
-              />
+              <Select value={newProxy} onValueChange={setNewProxy}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Выберите прокси" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_PROXY}>Без прокси</SelectItem>
+                  {proxies.map((p) => (
+                    <SelectItem key={p.id} value={p.value}>
+                      {p.value}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {proxies.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Список прокси пуст — добавьте их на странице "Управление прокси".
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>
@@ -402,52 +521,70 @@ const Accounts = () => {
         </DialogContent>
       </Dialog>
 
-      {/* QR Scanner dialog */}
-      <Dialog open={qrDialogOpen} onOpenChange={setQrDialogOpen}>
-        <DialogContent className="max-w-sm">
+      {/* Edit profile dialog */}
+      <Dialog open={editId !== null} onOpenChange={(open) => !open && closeEdit()}>
+        <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Авторизовать WhatsApp</DialogTitle>
+            <DialogTitle>Настройки профиля</DialogTitle>
             <DialogDescription>
-              Отсканируйте QR-код в мобильном приложении WhatsApp.
+              Смена прокси перезапустит активную сессию — привязка устройства при этом сохраняется.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex flex-col items-center justify-center p-4">
-            {activeProfileForQr?.qr ? (
-              <div className="border p-2 bg-white rounded-lg">
-                <img
-                  src={activeProfileForQr.qr}
-                  alt="WhatsApp QR Code"
-                  className="h-64 w-64 object-contain"
-                />
-              </div>
-            ) : (
-              <div className="h-64 w-64 border-2 border-dashed border-muted-foreground/30 rounded-lg flex flex-col items-center justify-center text-muted-foreground text-sm p-4 text-center">
-                <Loader2 className="h-8 w-8 animate-spin text-primary mb-2" />
-                Генерация QR-кода...
-              </div>
-            )}
-
-            <div className="mt-4 space-y-2 text-xs text-muted-foreground">
-              <p>1. Откройте WhatsApp на телефоне.</p>
-              <p>2. Нажмите Меню (три точки) или Настройки &rarr; Связанные устройства.</p>
-              <p>3. Нажмите "Привязка устройства" и наведите на этот код.</p>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold">Имя профиля</label>
+              <Input
+                placeholder="Call-центр 1"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+              />
             </div>
-            <div className="mt-2 w-full">
-              <p className="text-xs text-muted-foreground text-center mb-1">
-                Подключает чужой WhatsApp? Отправьте ссылку — тот же QR откроется у него.
-              </p>
-              <Button variant="outline" size="sm" className="w-full" onClick={copyInviteLink}>
-                Скопировать ссылку для отправки
-              </Button>
+            <div className="space-y-2">
+              <label className="text-xs font-semibold">Proxy</label>
+              <Select value={editProxy} onValueChange={setEditProxy}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Выберите прокси" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_PROXY}>Без прокси</SelectItem>
+                  {proxyOptions(editProxy === NO_PROXY ? "" : editProxy).map((value) => (
+                    <SelectItem key={value} value={value}>
+                      {value}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-semibold">Дневной лимит сообщений</label>
+              <Input
+                type="number"
+                min={0}
+                placeholder="0 — без лимита"
+                value={editLimit}
+                onChange={(e) => setEditLimit(e.target.value)}
+              />
             </div>
           </div>
           <DialogFooter>
-            <Button onClick={() => setQrDialogOpen(false)} className="w-full">
-              Закрыть
+            <Button variant="outline" onClick={closeEdit}>Отмена</Button>
+            <Button onClick={handleSaveEdit} disabled={editMutation.isPending}>
+              {editMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Сохранить
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* QR Scanner dialog */}
+      <QrDialog
+        open={qrDialogOpen}
+        onOpenChange={(open) => {
+          setQrDialogOpen(open);
+          if (!open) setActiveQrId(null);
+        }}
+        profile={activeProfileForQr}
+      />
 
       {/* Set limit dialog */}
       <Dialog open={limitOpen} onOpenChange={setLimitOpen}>

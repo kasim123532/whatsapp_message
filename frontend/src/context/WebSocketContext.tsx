@@ -40,10 +40,30 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
               if (!old) return old;
               return old.map((acc) =>
                 acc.id === payload.id
-                  ? { ...acc, qr: payload.qr, status: "CONNECTING" }
+                  ? {
+                      ...acc,
+                      qr: payload.qr,
+                      qrExpiresAt: payload.expiresAt ?? null,
+                      running: true,
+                      status: "CONNECTING"
+                    }
                   : acc
               );
             });
+          } else if (payload.type === "qr_expired") {
+            queryClient.setQueryData<WhatsAppProfile[]>(["accounts"], (old) => {
+              if (!old) return old;
+              return old.map((acc) =>
+                acc.id === payload.id
+                  ? { ...acc, qr: null, qrExpiresAt: null, running: false }
+                  : acc
+              );
+            });
+          } else if (payload.type === "removed") {
+            // A draft profile nobody scanned was discarded server-side.
+            queryClient.setQueryData<WhatsAppProfile[]>(["accounts"], (old) =>
+              old ? old.filter((acc) => acc.id !== payload.id) : old
+            );
           } else if (payload.type === "status") {
             queryClient.setQueryData<WhatsAppProfile[]>(["accounts"], (old) => {
               if (!old) return old;
@@ -54,11 +74,14 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 if (payload.status === "CONNECTED") {
                   toast.success(`Аккаунт ${displayPhone} подключен`);
                 } else if (payload.status === "DISCONNECTED") {
-                  toast.info(`Аккаунт ${displayPhone} отключен`);
+                  toast.info(payload.error || `Аккаунт ${displayPhone} отключен`);
                 } else if (payload.status === "BANNED") {
                   toast.error(`Аккаунт ${displayPhone} заблокирован!`);
                 }
               }
+
+              const stillRunning =
+                payload.status === "CONNECTED" || payload.status === "CONNECTING";
 
               return old.map((acc) =>
                 acc.id === payload.id
@@ -66,7 +89,13 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                       ...acc,
                       status: payload.status,
                       phone: payload.phone ?? acc.phone,
-                      qr: payload.status === "CONNECTED" ? null : acc.qr
+                      lastError: payload.error ?? null,
+                      running: stillRunning,
+                      qr: stillRunning && payload.status === "CONNECTING" ? acc.qr : null,
+                      qrExpiresAt:
+                        stillRunning && payload.status === "CONNECTING"
+                          ? acc.qrExpiresAt
+                          : null
                     }
                   : acc
               );

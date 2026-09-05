@@ -60,13 +60,23 @@ const broadcast = (data: any) => {
   }
 };
 
-// Connect WhatsApp Event Emitter to WebSockets
-whatsappEvents.on("qr", ({ phone, qr }) => {
-  broadcast({ type: "qr", phone, qr });
+// Connect WhatsApp Event Emitter to WebSockets. The payloads are forwarded as
+// they come out of the manager — every one of them is keyed by account `id`,
+// which is what the dashboard matches on.
+whatsappEvents.on("qr", (payload) => {
+  broadcast({ type: "qr", ...payload });
 });
 
-whatsappEvents.on("status", ({ phone, status }) => {
-  broadcast({ type: "status", phone, status });
+whatsappEvents.on("qr_expired", (payload) => {
+  broadcast({ type: "qr_expired", ...payload });
+});
+
+whatsappEvents.on("status", (payload) => {
+  broadcast({ type: "status", ...payload });
+});
+
+whatsappEvents.on("removed", (payload) => {
+  broadcast({ type: "removed", ...payload });
 });
 
 // Start the WhatsApp manager & Scheduler

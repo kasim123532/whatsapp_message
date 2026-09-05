@@ -21,10 +21,17 @@ const ProxyManagement = () => {
   const addProxiesMutation = useMutation({
     mutationFn: (text: string) =>
       apiRequest("/proxies", { method: "POST", body: JSON.stringify({ text }) }),
-    onSuccess: (res: { added: number; skipped: number }) => {
+    onSuccess: (res: { added: number; skipped: number; invalid?: string[] }) => {
       queryClient.invalidateQueries({ queryKey: ["proxies"] });
       setProxyText("");
       toast.success(`Добавлено: ${res.added}${res.skipped ? `, пропущено дублей: ${res.skipped}` : ""}`);
+      if (res.invalid?.length) {
+        toast.error(
+          `Не распознано ${res.invalid.length} строк: ${res.invalid.slice(0, 3).join(", ")}${
+            res.invalid.length > 3 ? "…" : ""
+          }`
+        );
+      }
     },
     onError: (err: any) => {
       toast.error(err.message || "Ошибка добавления прокси");
@@ -56,11 +63,13 @@ const ProxyManagement = () => {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              По одному прокси на строку: host:port или host:port:username:password
+              По одному прокси на строку: <code>host:port</code>,{" "}
+              <code>host:port:username:password</code> или{" "}
+              <code>scheme://username:password@host:port</code> (http, https, socks4, socks5).
             </p>
             <Textarea
               rows={4}
-              placeholder={"1.2.3.4:8080\n1.2.3.5:8080:user:pass"}
+              placeholder={"1.2.3.4:8080\n1.2.3.5:8080:user:pass\nsocks5://user:pass@1.2.3.6:1080"}
               value={proxyText}
               onChange={(e) => setProxyText(e.target.value)}
             />

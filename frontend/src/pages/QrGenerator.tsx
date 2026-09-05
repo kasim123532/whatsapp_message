@@ -2,10 +2,9 @@ import { useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
-} from "@/components/ui/dialog";
+import { QrDialog } from "@/components/QrDialog";
 import { QrCode, Loader2 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
@@ -17,6 +16,7 @@ const NO_PROXY = "__none__";
 const QrGenerator = () => {
   const queryClient = useQueryClient();
   const [selectedProxy, setSelectedProxy] = useState(NO_PROXY);
+  const [profileName, setProfileName] = useState("");
   const [qrDialogOpen, setQrDialogOpen] = useState(false);
   const [activeQrId, setActiveQrId] = useState<string | null>(null);
 
@@ -44,9 +44,13 @@ const QrGenerator = () => {
   });
 
   const generateMutation = useMutation({
-    mutationFn: (proxy: string) =>
-      apiRequest("/accounts", { method: "POST", body: JSON.stringify({ proxy }) }),
-    onSuccess: (newProfile) => {
+    mutationFn: (body: { proxy: string; name: string }) =>
+      // draft: the profile is thrown away again if nobody scans the code.
+      apiRequest("/accounts", {
+        method: "POST",
+        body: JSON.stringify({ ...body, draft: true })
+      }),
+    onSuccess: (newProfile: WhatsAppProfile) => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
       connectMutation.mutate(newProfile.id);
     },
@@ -55,17 +59,23 @@ const QrGenerator = () => {
     }
   });
 
-  const activeProfileForQr = accounts.find((a) => a.id === activeQrId);
-  const activeQrLink = activeQrId ? `${window.location.origin}/connect/${activeQrId}` : "";
-
-  const copyInviteLink = () => {
-    if (!activeQrLink) return;
-    navigator.clipboard.writeText(activeQrLink);
-    toast.success("Ссылка скопирована");
-  };
+  const activeProfileForQr = accounts.find((a) => a.id === activeQrId) ?? null;
+  const isBusy = generateMutation.isPending || connectMutation.isPending;
 
   const handleGenerate = () => {
-    generateMutation.mutate(selectedProxy === NO_PROXY ? "" : selectedProxy);
+    generateMutation.mutate({
+      proxy: selectedProxy === NO_PROXY ? "" : selectedProxy,
+      name: profileName.trim()
+    });
+  };
+
+  const handleDialogChange = (open: boolean) => {
+    setQrDialogOpen(open);
+    if (!open) {
+      setActiveQrId(null);
+      // A finished login keeps its name; a discarded draft leaves nothing behind.
+      setProfileName("");
+    }
   };
 
   return (
@@ -81,6 +91,18 @@ const QrGenerator = () => {
             <CardTitle className="text-lg font-display">Новый WhatsApp профиль</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold">Имя профиля (опционально)</label>
+              <Input
+                placeholder="Call-центр 1"
+                value={profileName}
+                onChange={(e) => setProfileName(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Номер определится сам после сканирования QR-кода.
+              </p>
+            </div>
+
             <div className="space-y-2">
               <label className="text-xs font-semibold">Прокси (опционально)</label>
               <Select value={selectedProxy} onValueChange={setSelectedProxy}>
@@ -102,66 +124,24 @@ const QrGenerator = () => {
                 </p>
               )}
             </div>
-            <Button
-              className="w-full"
-              onClick={handleGenerate}
-              disabled={generateMutation.isPending || connectMutation.isPending}
-            >
-              {generateMutation.isPending || connectMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : null}
+
+            <Button className="w-full" onClick={handleGenerate} disabled={isBusy}>
+              {isBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               Сгенерировать QR
             </Button>
+            <p className="text-xs text-muted-foreground">
+              Пока код не отсканирован, профиль считается черновиком: он исчезнет,
+              если закрыть окно или не отсканировать код вовремя.
+            </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* QR Scanner dialog */}
-      <Dialog open={qrDialogOpen} onOpenChange={setQrDialogOpen}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Авторизовать WhatsApp</DialogTitle>
-            <DialogDescription>
-              Отсканируйте QR-код в мобильном приложении WhatsApp.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col items-center justify-center p-4">
-            {activeProfileForQr?.qr ? (
-              <div className="border p-2 bg-white rounded-lg">
-                <img
-                  src={activeProfileForQr.qr}
-                  alt="WhatsApp QR Code"
-                  className="h-64 w-64 object-contain"
-                />
-              </div>
-            ) : (
-              <div className="h-64 w-64 border-2 border-dashed border-muted-foreground/30 rounded-lg flex flex-col items-center justify-center text-muted-foreground text-sm p-4 text-center">
-                <Loader2 className="h-8 w-8 animate-spin text-primary mb-2" />
-                Генерация QR-кода...
-              </div>
-            )}
-
-            <div className="mt-4 space-y-2 text-xs text-muted-foreground">
-              <p>1. Откройте WhatsApp на телефоне.</p>
-              <p>2. Нажмите Меню (три точки) или Настройки &rarr; Связанные устройства.</p>
-              <p>3. Нажмите "Привязка устройства" и наведите на этот код.</p>
-            </div>
-            <div className="mt-2 w-full">
-              <p className="text-xs text-muted-foreground text-center mb-1">
-                Подключает чужой WhatsApp? Отправьте ссылку — тот же QR откроется у него.
-              </p>
-              <Button variant="outline" size="sm" className="w-full" onClick={copyInviteLink}>
-                Скопировать ссылку для отправки
-              </Button>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button onClick={() => setQrDialogOpen(false)} className="w-full">
-              Закрыть
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <QrDialog
+        open={qrDialogOpen}
+        onOpenChange={handleDialogChange}
+        profile={activeProfileForQr}
+      />
     </DashboardLayout>
   );
 };

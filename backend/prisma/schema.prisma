@@ -13,6 +13,10 @@ model Account {
   name       String?
   proxy      String?
   status     String   @default("DISCONNECTED") // "DISCONNECTED", "CONNECTING", "CONNECTED", "BANNED"
+  // Draft profiles are created by the QR page before anything is scanned. They
+  // are swept away if nobody ever links a phone to them.
+  isDraft    Boolean  @default(false)
+  lastError  String?
   todaySent  Int      @default(0)
   dailyLimit Int      @default(0)
   totalSent  Int      @default(0)
