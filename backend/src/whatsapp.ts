@@ -96,6 +96,12 @@ class WhatsAppManager {
     this.janitor = setInterval(() => {
       this.sweepPending().catch((err) => console.error("[WhatsApp] Pending sweep failed:", err));
     }, SWEEP_INTERVAL_MS);
+
+    // A rebuild kills the container but keeps the sessions volume, so any
+    // Chromium Singleton lock left behind points at a dead host and would
+    // block every future launch. No browser is alive at boot, so all of them
+    // are stale by definition.
+    this.clearAllStaleProfileLocks();
   }
 
   getClient(id: string): Client | undefined {
@@ -139,6 +145,11 @@ class WhatsAppManager {
     }
 
     console.log(`[WhatsApp] Connecting client for ${id}...`);
+    // The sessions volume survives container rebuilds but the browsers don't:
+    // a Singleton lock left by the previous container would make Chromium
+    // refuse to start. A live client for this id returns above, so anything
+    // still on disk here is orphaned.
+    this.clearStaleProfileLocks(id);
     await prisma.account.updateMany({
       where: { id },
       data: { status: "CONNECTING", lastError: null, lastAttemptAt: new Date() }
@@ -428,6 +439,42 @@ class WhatsAppManager {
 
   private sessionDir(id: string) {
     return path.join(SESSIONS_ROOT, `session-${id}`);
+  }
+
+  /**
+   * Removes orphaned Chromium Singleton lockfiles for one profile. They are
+   * only meaningful while their browser is alive; after a container rebuild
+   * they point at a dead host and block every launch with "profile appears
+   * to be in use".
+   */
+  private clearStaleProfileLocks(id: string) {
+    const dir = this.sessionDir(id);
+    for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
+      const file = path.join(dir, name);
+      try {
+        if (fs.existsSync(file)) {
+          fs.rmSync(file, { force: true });
+          console.log(`[WhatsApp] Removed stale ${name} for ${id}`);
+        }
+      } catch (err) {
+        console.error(`[WhatsApp] Failed to remove ${name} for ${id}:`, err);
+      }
+    }
+  }
+
+  /** Same as above, for every stored profile — runs once at boot. */
+  private clearAllStaleProfileLocks() {
+    let dirents: fs.Dirent[] = [];
+    try {
+      dirents = fs.readdirSync(SESSIONS_ROOT, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of dirents) {
+      if (entry.isDirectory() && entry.name.startsWith("session-")) {
+        this.clearStaleProfileLocks(entry.name.slice("session-".length));
+      }
+    }
   }
 
   private hasSession(id: string) {
