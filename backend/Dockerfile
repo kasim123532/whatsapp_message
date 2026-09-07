@@ -42,8 +42,11 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
 COPY prisma ./prisma/
+# Pinned WhatsApp Web bundle (must match PINNED_WEB_VERSION in src/whatsapp.ts).
+# Without this the strict local cache throws on every launch.
+COPY --from=build /app/.wwebjs_cache ./.wwebjs_cache
 
 EXPOSE 5000
 
 # Start server
-CMD ["sh", "-c", "npx prisma db push && node dist/server.js"]
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss && node dist/server.js"]

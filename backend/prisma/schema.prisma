@@ -96,7 +96,7 @@ model Campaign {
   status         String              @default("DRAFT") // "DRAFT", "RUNNING", "PAUSED", "COMPLETED"
   recipients     CampaignRecipient[]
   createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
+  updatedAt      DateTime            @updatedAt @default(now())
 }
 
 model CampaignRecipient {
@@ -117,7 +117,7 @@ model CampaignRecipient {
   sentText        String?
   sentAt     DateTime?
   error      String?
-  updatedAt  DateTime  @updatedAt
+  updatedAt  DateTime  @updatedAt @default(now())
 
   @@unique([campaignId, contactId])
 }

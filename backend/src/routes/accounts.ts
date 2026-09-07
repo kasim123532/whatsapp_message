@@ -316,9 +316,15 @@ router.post(
     if (!account) {
       return res.status(404).json({ error: "Account not found in database" });
     }
+    if (wsManager.isConnecting(id)) {
+      return res.status(409).json({ error: "Already connecting" });
+    }
 
-    // Trigger connection in background (async)
+    // Trigger connection in background (async). A racing second click gets
+    // 409 above; a late failure from a superseded browser is ignored by the
+    // manager's generation guard instead of killing the replacement.
     wsManager.connect(id).catch((err) => {
+      if (err instanceof Error && err.message === "Already connecting") return;
       console.error(`Error connecting account ${id}:`, err);
     });
 
@@ -338,9 +344,13 @@ router.post(
     if (account.status === "CONNECTED") {
       return res.status(400).json({ error: "Профиль уже подключен" });
     }
+    if (wsManager.isConnecting(id)) {
+      return res.status(409).json({ error: "Already connecting" });
+    }
 
     // Drop the stale browser first, otherwise connect() would just hand back the
-    // client that is already sitting on an expired code.
+    // client that is already sitting on an expired code. disconnect() awaits
+    // the full browser teardown, so the fresh launch below can't race it.
     await wsManager.disconnect(id);
     wsManager.connect(id).catch((err) => {
       console.error(`Error refreshing QR for account ${id}:`, err);

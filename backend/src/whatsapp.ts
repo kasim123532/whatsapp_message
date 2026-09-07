@@ -26,6 +26,27 @@ const PENDING_GRACE_MS = Number(process.env.PENDING_GRACE_MS) || 2 * 60 * 1000;
 /** How often the janitor looks for never-linked profiles to collect. */
 const SWEEP_INTERVAL_MS = 30 * 1000;
 
+/**
+ * Pinned WhatsApp Web version. whatsapp-web.js defaults to an old bundled
+ * version and otherwise fetches live web.whatsapp.com on every launch, which
+ * is non-reproducible and breaks whenever Meta ships a DOM change mid-week.
+ * This must match a file in ./.wwebjs_cache/ (strict mode below throws if it
+ * is missing instead of silently falling back to live).
+ *
+ * Bump procedure: connect once with strict:false (or read the version the
+ * client persists to .wwebjs_cache after a good launch), copy the new
+ * <version>.html into backend/.wwebjs_cache/, update this constant, rebuild.
+ */
+const PINNED_WEB_VERSION = "2.3000.1046948731";
+
+/** Init retries for transient Puppeteer crashes (see isTransientInitError). */
+const INIT_MAX_RETRIES = 2;
+const INIT_RETRY_BACKOFF_MS = [2000, 5000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** A profile row the janitor is allowed to delete. */
 type PendingLike = {
   isDraft: boolean;
@@ -47,6 +68,23 @@ class WhatsAppManager {
   private qrs: Map<string, QrState> = new Map();
   private deadlines: Map<string, NodeJS.Timeout> = new Map();
   private janitor: NodeJS.Timeout | null = null;
+  /**
+   * ids with a connect() currently in its initialize phase (before the
+   * client is fully up). A second connect() for the same id while present
+   * here gets a fast "Already connecting" error instead of spawning a
+   * second Chromium on the same session folder.
+   */
+  private pending = new Set<string>();
+  /**
+   * Monotonic generation per account, bumped on every connect/disconnect.
+   * Async continuations (initialize().catch, wwebjs event handlers, QR
+   * deadline timers) capture the generation they started with and ignore
+   * themselves if a newer generation exists — so a stale failure from a
+   * superseded browser can never kill the replacement client.
+   */
+  private generation = new Map<string, number>();
+  /** In-flight client.destroy() promises, so a new launch waits for teardown. */
+  private destroyPromises = new Map<string, Promise<void>>();
 
   async init() {
     // A CONNECTING row means the process died mid-handshake — there is no live
@@ -85,6 +123,13 @@ class WhatsAppManager {
       console.log(`[WhatsApp] ${orphaned.length} accounts lost their session folder, marked disconnected.`);
     }
 
+    // A rebuild kills the container but keeps the sessions volume, so any
+    // Chromium Singleton lock left behind points at a dead host and would
+    // block every future launch. No browser is alive at boot, so all of them
+    // are stale by definition. This MUST run before the auto-connect loop
+    // below — otherwise the first launch hits the lock and dies.
+    this.clearAllStaleProfileLocks();
+
     console.log(`[WhatsApp] Auto-connecting ${resumable.length} accounts...`);
     for (const acc of resumable) {
       this.connect(acc.id).catch((err) => {
@@ -96,12 +141,6 @@ class WhatsAppManager {
     this.janitor = setInterval(() => {
       this.sweepPending().catch((err) => console.error("[WhatsApp] Pending sweep failed:", err));
     }, SWEEP_INTERVAL_MS);
-
-    // A rebuild kills the container but keeps the sessions volume, so any
-    // Chromium Singleton lock left behind points at a dead host and would
-    // block every future launch. No browser is alive at boot, so all of them
-    // are stale by definition.
-    this.clearAllStaleProfileLocks();
   }
 
   getClient(id: string): Client | undefined {
@@ -118,6 +157,72 @@ class WhatsAppManager {
 
   isRunning(id: string): boolean {
     return this.clients.has(id);
+  }
+
+  isConnecting(id: string): boolean {
+    return this.pending.has(id);
+  }
+
+  private nextGen(id: string): number {
+    const gen = (this.generation.get(id) ?? 0) + 1;
+    this.generation.set(id, gen);
+    return gen;
+  }
+
+  private currentGen(id: string): number {
+    return this.generation.get(id) ?? 0;
+  }
+
+  private async waitForDestroy(id: string): Promise<void> {
+    const p = this.destroyPromises.get(id);
+    if (p) {
+      try {
+        await p;
+      } catch {
+        // destroy errors are logged at the source; the barrier itself never throws.
+      }
+    }
+  }
+
+  /**
+   * Transient browser crashes worth retrying: the page navigated or the
+   * target died while whatsapp-web.js was injecting/evaluating. Anything
+   * else (bad proxy, missing executable, auth failure) fails fast.
+   */
+  private isTransientInitError(err: unknown): boolean {
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    return /Execution context was destroyed|Target closed|Session closed|Protocol error|Navigation failed|net::ERR_|Timed out/i.test(
+      msg
+    );
+  }
+
+  private async initWithRetry(client: Client, id: string, gen: number): Promise<void> {
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt <= INIT_MAX_RETRIES; attempt++) {
+      if (gen !== this.currentGen(id)) {
+        throw new Error("Superseded");
+      }
+      try {
+        await client.initialize();
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (gen !== this.currentGen(id)) {
+          throw err;
+        }
+        const transient = this.isTransientInitError(err);
+        if (attempt >= INIT_MAX_RETRIES || !transient) {
+          throw err;
+        }
+        const delay = INIT_RETRY_BACKOFF_MS[attempt] ?? 5000;
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[WhatsApp] Transient init failure for ${id} (attempt ${attempt + 1}/${INIT_MAX_RETRIES + 1}), retrying in ${delay}ms: ${reason}`
+        );
+        await sleep(delay);
+      }
+    }
+    throw lastErr;
   }
 
   /**
@@ -138,6 +243,18 @@ class WhatsAppManager {
       console.log(`[WhatsApp] Client already exists for ${id}`);
       return this.clients.get(id)!;
     }
+    if (this.pending.has(id)) {
+      throw new Error("Already connecting");
+    }
+    // A previous destroy (cancel/refresh/disconnect) may still be closing
+    // its browser. Launching now would put two Chromiums on one profile.
+    await this.waitForDestroy(id);
+    if (this.clients.has(id)) {
+      return this.clients.get(id)!;
+    }
+    if (this.pending.has(id)) {
+      throw new Error("Already connecting");
+    }
 
     const account = await prisma.account.findUnique({ where: { id } });
     if (!account) {
@@ -145,10 +262,13 @@ class WhatsAppManager {
     }
 
     console.log(`[WhatsApp] Connecting client for ${id}...`);
+    this.pending.add(id);
+    const gen = this.nextGen(id);
     // The sessions volume survives container rebuilds but the browsers don't:
     // a Singleton lock left by the previous container would make Chromium
-    // refuse to start. A live client for this id returns above, so anything
-    // still on disk here is orphaned.
+    // refuse to start. A live client for this id returns above, and any
+    // in-flight destroy was awaited above, so anything still on disk here
+    // is orphaned.
     this.clearStaleProfileLocks(id);
     await prisma.account.updateMany({
       where: { id },
@@ -176,7 +296,8 @@ class WhatsAppManager {
       if (!proxy) {
         const message = `Не удалось разобрать прокси: ${account.proxy}`;
         console.error(`[WhatsApp] ${message}`);
-        await this.fail(id, message);
+        this.pending.delete(id);
+        await this.fail(id, message, "DISCONNECTED", gen);
         throw new Error(message);
       }
       puppeteerArgs.push(`--proxy-server=${proxyServerArg(proxy)}`);
@@ -187,11 +308,20 @@ class WhatsAppManager {
 
     // Identity for the WhatsApp session is the account's own id, not its phone
     // number — the phone number isn't known until the QR code is scanned.
+    // webVersion is pinned with a strict local cache (see PINNED_WEB_VERSION)
+    // so every launch uses the same tested WA Web bundle instead of whatever
+    // Meta happens to serve that minute.
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: id,
         dataPath: SESSIONS_ROOT
       }),
+      webVersion: PINNED_WEB_VERSION,
+      webVersionCache: {
+        type: "local",
+        path: "./.wwebjs_cache/",
+        strict: true
+      },
       ...(proxyAuthentication ? { proxyAuthentication } : {}),
       puppeteer: {
         headless: true,
@@ -203,9 +333,11 @@ class WhatsAppManager {
     this.clients.set(id, client);
 
     client.on("qr", async (qrString) => {
+      if (gen !== this.currentGen(id)) return;
       console.log(`[WhatsApp] QR code generated for ${id}`);
       try {
         const dataUrl = await qrcode.toDataURL(qrString);
+        if (gen !== this.currentGen(id)) return;
         const expiresAt = this.deadlineFor(id);
         this.qrs.set(id, { dataUrl, expiresAt });
         whatsappEvents.emit("qr", { id, qr: dataUrl, expiresAt });
@@ -215,6 +347,7 @@ class WhatsAppManager {
     });
 
     client.on("authenticated", () => {
+      if (gen !== this.currentGen(id)) return;
       // Scanned — the browser is no longer idling on a QR screen.
       console.log(`[WhatsApp] Authenticated ${id}`);
       this.clearDeadline(id);
@@ -222,6 +355,7 @@ class WhatsAppManager {
     });
 
     client.on("ready", async () => {
+      if (gen !== this.currentGen(id)) return;
       console.log(`[WhatsApp] Client is ready for ${id}`);
       this.clearDeadline(id);
       this.qrs.delete(id);
@@ -260,34 +394,58 @@ class WhatsAppManager {
     });
 
     client.on("auth_failure", async (msg) => {
+      if (gen !== this.currentGen(id)) return;
       console.error(`[WhatsApp] Auth failure for ${id}:`, msg);
-      await this.fail(id, `Ошибка авторизации: ${msg}`);
+      await this.fail(id, `Ошибка авторизации: ${msg}`, "DISCONNECTED", gen);
     });
 
     client.on("disconnected", async (reason) => {
+      if (gen !== this.currentGen(id)) return;
       console.log(`[WhatsApp] Client disconnected for ${id}:`, reason);
       // WhatsApp reports an unlinked or blocked device by tearing the session down.
       const banned = typeof reason === "string" && /ban|conflict/i.test(reason);
       await this.fail(
         id,
         `Соединение разорвано: ${reason}`,
-        banned ? "BANNED" : "DISCONNECTED"
+        banned ? "BANNED" : "DISCONNECTED",
+        gen
       );
     });
 
-    this.armDeadline(id);
+    this.armDeadline(id, gen);
 
-    client.initialize().catch(async (err) => {
+    try {
+      await this.initWithRetry(client, id, gen);
+    } catch (err) {
+      if (gen !== this.currentGen(id)) {
+        // Superseded by a newer connect/disconnect — the replacement owns the row now.
+        this.pending.delete(id);
+        throw err;
+      }
+      if (err instanceof Error && err.message === "Superseded") {
+        this.pending.delete(id);
+        throw err;
+      }
       console.error(`[WhatsApp] Initialization error for ${id}:`, err);
-      await this.fail(id, err?.message || "Не удалось запустить браузер");
-    });
+      const message = err instanceof Error ? err.message : "Не удалось запустить браузер";
+      await this.fail(id, message || "Не удалось запустить браузер", "DISCONNECTED", gen);
+      this.pending.delete(id);
+      // init errors are recorded via fail(); don't rethrow so background
+      // callers (routes, boot auto-connect) keep their fire-and-forget shape.
+      return client;
+    }
 
+    this.pending.delete(id);
     return client;
   }
 
   /** Stops the client but keeps the stored session, so the next login skips the QR. */
   async disconnect(id: string, emitStatus = true): Promise<void> {
     console.log(`[WhatsApp] Disconnecting client for ${id}...`);
+    // Invalidate any in-flight initialize/event callbacks for this id first,
+    // so their late failures can't clobber the DISCONNECTED state we write below.
+    this.nextGen(id);
+    this.pending.delete(id);
     this.clearDeadline(id);
     this.qrs.delete(id);
     await this.destroyClient(id);
@@ -303,6 +461,8 @@ class WhatsAppManager {
   /** Unlinks the device on the phone's side and wipes the local session. */
   async logout(id: string): Promise<void> {
     console.log(`[WhatsApp] Logging out ${id}...`);
+    this.nextGen(id);
+    this.pending.delete(id);
     this.clearDeadline(id);
     this.qrs.delete(id);
 
@@ -335,6 +495,8 @@ class WhatsAppManager {
    * moment the row will be collected, or null if it is here to stay.
    */
   async cancelConnect(id: string): Promise<number | null> {
+    this.nextGen(id);
+    this.pending.delete(id);
     this.clearDeadline(id);
     this.qrs.delete(id);
     await this.destroyClient(id);
@@ -376,8 +538,9 @@ class WhatsAppManager {
     });
 
     // Never sweep a profile whose browser is still up — somebody may be looking
-    // at its QR right now.
-    const abandoned = stale.filter((acc) => !this.clients.has(acc.id));
+    // at its QR right now. Pending covers the gap between the connect guard
+    // and clients.set, so a row can't be deleted under a launching browser.
+    const abandoned = stale.filter((acc) => !this.clients.has(acc.id) && !this.pending.has(acc.id));
     if (abandoned.length === 0) return 0;
 
     for (const acc of abandoned) {
@@ -398,7 +561,10 @@ class WhatsAppManager {
   }
 
   /** Tears the client down and records why, without throwing at the caller. */
-  private async fail(id: string, message: string, status = "DISCONNECTED") {
+  private async fail(id: string, message: string, status = "DISCONNECTED", gen?: number) {
+    if (gen !== undefined && gen !== this.currentGen(id)) {
+      return;
+    }
     this.clearDeadline(id);
     this.qrs.delete(id);
     await this.destroyClient(id);
@@ -414,15 +580,16 @@ class WhatsAppManager {
     return existing ?? Date.now() + QR_WINDOW_MS;
   }
 
-  private armDeadline(id: string) {
+  private armDeadline(id: string, gen: number) {
     this.clearDeadline(id);
     const timer = setTimeout(() => {
       this.deadlines.delete(id);
+      if (gen !== this.currentGen(id)) return;
       console.log(`[WhatsApp] QR window expired for ${id}`);
       whatsappEvents.emit("qr_expired", { id });
       // The browser goes away, but the profile row stays so the dashboard can
       // offer "обновить код". If it really is abandoned, sweepPending collects it.
-      this.fail(id, "QR-код устарел — его никто не отсканировал вовремя").catch((err) =>
+      this.fail(id, "QR-код устарел — его никто не отсканировал вовремя", "DISCONNECTED", gen).catch((err) =>
         console.error(`[WhatsApp] Failed to clean up expired QR for ${id}:`, err)
       );
     }, QR_WINDOW_MS);
@@ -445,17 +612,16 @@ class WhatsAppManager {
    * Removes orphaned Chromium Singleton lockfiles for one profile. They are
    * only meaningful while their browser is alive; after a container rebuild
    * they point at a dead host and block every launch with "profile appears
-   * to be in use".
+   * to be in use". NOTE: these are DANGLING SYMLINKS (e.g. SingletonLock ->
+   * <dead-hostname>-<pid>), so fs.existsSync() reports false for them — it
+   * follows the link. Always rm unconditionally with force:true instead.
    */
   private clearStaleProfileLocks(id: string) {
     const dir = this.sessionDir(id);
     for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
       const file = path.join(dir, name);
       try {
-        if (fs.existsSync(file)) {
-          fs.rmSync(file, { force: true });
-          console.log(`[WhatsApp] Removed stale ${name} for ${id}`);
-        }
+        fs.rmSync(file, { force: true });
       } catch (err) {
         console.error(`[WhatsApp] Failed to remove ${name} for ${id}:`, err);
       }
@@ -493,13 +659,33 @@ class WhatsAppManager {
   }
 
   private async destroyClient(id: string) {
+    // Serialize teardowns per id and let a racing connect() wait for us via
+    // waitForDestroy(). The map entry is removed up front so isRunning()
+    // goes false immediately, but the browser close is awaited.
+    const prev = this.destroyPromises.get(id);
+    if (prev) {
+      try {
+        await prev;
+      } catch {
+        // Logged at the source.
+      }
+    }
     const client = this.clients.get(id);
-    if (client) {
-      this.clients.delete(id);
+    this.clients.delete(id);
+    if (!client) return;
+    const p = (async () => {
       try {
         await client.destroy();
       } catch (e) {
         console.error(`[WhatsApp] Error destroying client ${id}:`, e);
+      }
+    })();
+    this.destroyPromises.set(id, p);
+    try {
+      await p;
+    } finally {
+      if (this.destroyPromises.get(id) === p) {
+        this.destroyPromises.delete(id);
       }
     }
   }
