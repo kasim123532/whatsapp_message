@@ -1,21 +1,26 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Plus, Search, Trash2, Users, Phone, FolderPlus, ChevronRight, ChevronDown,
-  Import, CheckCircle2, XCircle, Loader2, FolderOpen, UserPlus
+  Import, CheckCircle2, XCircle, Loader2, FolderOpen, UserPlus,
+  ChevronLeft, ArrowRightLeft, Download, X
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { toast } from "sonner";
-import { Contact, SubGroup, ContactGroup } from "@/types";
+import { Contact, ContactGroup } from "@/types";
+
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 const Contacts = () => {
   const queryClient = useQueryClient();
@@ -28,12 +33,21 @@ const Contacts = () => {
   const [subGroupDialogOpen, setSubGroupDialogOpen] = useState(false);
   const [contactDialogOpen, setContactDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
 
   const [newGroupName, setNewGroupName] = useState("");
   const [newSubGroupName, setNewSubGroupName] = useState("");
   const [targetGroupId, setTargetGroupId] = useState("");
   const [newContact, setNewContact] = useState({ name: "", phone: "", variables: "" });
   const [importText, setImportText] = useState("");
+
+  // Selection + pagination
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [moveTargetGroupId, setMoveTargetGroupId] = useState("");
+  const [moveTargetSubGroupId, setMoveTargetSubGroupId] = useState("");
 
   // Queries
   const { data: groups = [], isLoading } = useQuery<ContactGroup[]>({
@@ -101,9 +115,47 @@ const Contacts = () => {
 
   const deleteContactMutation = useMutation({
     mutationFn: (id: string) => apiRequest(`/contacts/contacts/${id}`, { method: "DELETE" }),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
       queryClient.invalidateQueries({ queryKey: ["contactGroups"] });
+      setSelectedIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       toast.success("Контакт удален");
+    },
+    onError: (err: any) => toast.error(err.message)
+  });
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) =>
+      apiRequest("/contacts/contacts/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
+    onSuccess: (data: { count: number }) => {
+      queryClient.invalidateQueries({ queryKey: ["contactGroups"] });
+      setSelectedIds(new Set());
+      setBulkDeleteOpen(false);
+      toast.success(data.count === 1 ? "Контакт удален" : `Удалено контактов: ${data.count}`);
+    },
+    onError: (err: any) => toast.error(err.message)
+  });
+
+  const bulkMoveMutation = useMutation({
+    mutationFn: (data: { ids: string[]; targetSubGroupId: string }) =>
+      apiRequest("/contacts/contacts/bulk-move", { method: "POST", body: JSON.stringify(data) }),
+    onSuccess: (data: { count: number }, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["contactGroups"] });
+      setSelectedIds(new Set());
+      setMoveDialogOpen(false);
+      // If contacts were moved out of the current view, keep the user on a valid page
+      setPage(1);
+      if (variables.targetSubGroupId !== selectedSubGroup?.subGroupId) {
+        const targetGroup = groups.find((g) => g.subGroups.some((sg) => sg.id === variables.targetSubGroupId));
+        if (targetGroup) {
+          setSelectedSubGroup({ groupId: targetGroup.id, subGroupId: variables.targetSubGroupId });
+        }
+      }
+      toast.success(`Перемещено контактов: ${data.count}`);
     },
     onError: (err: any) => toast.error(err.message)
   });
@@ -233,18 +285,28 @@ const Contacts = () => {
     checkWhatsAppMutation.mutate(contactId);
   };
 
-  const handleCheckAllWhatsApp = (subGroupId: string) => {
+  const handleCheckAllWhatsApp = (subGroupId: string, onlyIds?: string[]) => {
     const subGroup = groups
       .flatMap((g) => g.subGroups)
       .find((sg) => sg.id === subGroupId);
-    
+
     if (!subGroup) return;
-    
-    subGroup.contacts.forEach((c, i) => {
+
+    const targets = onlyIds && onlyIds.length > 0
+      ? subGroup.contacts.filter((c) => onlyIds.includes(c.id))
+      : subGroup.contacts;
+
+    if (targets.length === 0) {
+      toast.error("Нет контактов для проверки");
+      return;
+    }
+
+    targets.forEach((c, i) => {
       setTimeout(() => {
         handleCheckWhatsApp(c.id);
       }, i * 1500); // Stagger checks to prevent rate limits
     });
+    toast.success(`Проверка запущена: ${targets.length}`);
   };
 
   const handleDeleteContact = (contactId: string) => {
@@ -270,13 +332,140 @@ const Contacts = () => {
         ?.subGroups.find((sg) => sg.id === selectedSubGroup.subGroupId)
     : null;
 
-  const filteredContacts = activeSubGroup
-    ? activeSubGroup.contacts.filter(
-        (c) =>
-          c.name.toLowerCase().includes(search.toLowerCase()) ||
-          c.phone.includes(search)
-      )
-    : [];
+  const filteredContacts = useMemo(() => {
+    if (!activeSubGroup) return [];
+    const q = search.toLowerCase();
+    return activeSubGroup.contacts.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.phone.includes(search)
+    );
+  }, [activeSubGroup, search]);
+
+  // Reset selection + page when switching subgroups; reset page on search
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setPage(1);
+  }, [selectedSubGroup?.subGroupId]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredContacts.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginatedContacts = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredContacts.slice(start, start + pageSize);
+  }, [filteredContacts, safePage, pageSize]);
+
+  const from = filteredContacts.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const to = Math.min(safePage * pageSize, filteredContacts.length);
+
+  const selectedCount = useMemo(
+    () => filteredContacts.filter((c) => selectedIds.has(c.id)).length,
+    [filteredContacts, selectedIds]
+  );
+  const selectedIdList = useMemo(
+    () => filteredContacts.filter((c) => selectedIds.has(c.id)).map((c) => c.id),
+    [filteredContacts, selectedIds]
+  );
+  const allFilteredSelected = filteredContacts.length > 0 && selectedCount === filteredContacts.length;
+
+  const pageNumbers = useMemo(() => {
+    if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+    const pages = new Set([1, 2, safePage - 1, safePage, safePage + 1, totalPages - 1, totalPages]);
+    return [...pages].filter((p) => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+  }, [totalPages, safePage]);
+
+  const toggleOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllFiltered = () => {
+    if (allFilteredSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        filteredContacts.forEach((c) => next.delete(c.id));
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        filteredContacts.forEach((c) => next.add(c.id));
+        return next;
+      });
+    }
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const openMoveDialog = () => {
+    if (selectedIdList.length === 0) {
+      toast.error("Выберите контакты");
+      return;
+    }
+    // Default the move target to the current group so the user only picks a subgroup
+    setMoveTargetGroupId(selectedSubGroup?.groupId ?? groups[0]?.id ?? "");
+    setMoveTargetSubGroupId("");
+    setMoveDialogOpen(true);
+  };
+
+  const handleBulkMove = () => {
+    if (!moveTargetSubGroupId) {
+      toast.error("Выберите целевую подгруппу");
+      return;
+    }
+    if (moveTargetSubGroupId === selectedSubGroup?.subGroupId) {
+      toast.error("Контакты уже находятся в этой подгруппе");
+      return;
+    }
+    bulkMoveMutation.mutate({ ids: selectedIdList, targetSubGroupId: moveTargetSubGroupId });
+  };
+
+  const escapeCsvValue = (v: string) => {
+    if (/[;"\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+    return v;
+  };
+
+  const handleExport = () => {
+    const source = selectedIdList.length > 0
+      ? filteredContacts.filter((c) => selectedIds.has(c.id))
+      : filteredContacts;
+    if (source.length === 0) {
+      toast.error("Нет контактов для экспорта");
+      return;
+    }
+    const lines = source.map((c) => {
+      const varKeys = Object.keys(c.variables).sort((a, b) => {
+        const na = parseInt(a.replace("field_", ""), 10) || 0;
+        const nb = parseInt(b.replace("field_", ""), 10) || 0;
+        return na - nb;
+      });
+      const cells = [c.phone, ...varKeys.map((k) => c.variables[k] ?? "")];
+      return cells.map(escapeCsvValue).join(";");
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `contacts-${activeSubGroup?.name ?? "export"}-${source.length}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast.success(`Экспортировано: ${source.length}`);
+  };
+
+  const moveTargetSubGroups = useMemo(() => {
+    const g = groups.find((gr) => gr.id === moveTargetGroupId);
+    return g?.subGroups ?? [];
+  }, [groups, moveTargetGroupId]);
 
   const whatsappIcon = (status: Contact["whatsappStatus"]) => {
     switch (status) {
@@ -515,6 +704,51 @@ const Contacts = () => {
                       />
                     </div>
                   )}
+                  {activeSubGroup && filteredContacts.length > 0 && (
+                    <div className="flex items-center justify-between gap-2 mt-3 rounded-md bg-muted/50 px-3 py-2">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                        <Checkbox
+                          checked={allFilteredSelected ? true : selectedCount > 0 ? "indeterminate" : false}
+                          onCheckedChange={toggleAllFiltered}
+                        />
+                        <span className="text-muted-foreground">
+                          {selectedCount > 0 ? `Выбрано: ${selectedCount}` : "Выбрать все"}
+                        </span>
+                      </label>
+                      {selectedCount > 0 && (
+                        <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={clearSelection}>
+                          <X className="h-3.5 w-3.5" /> Сбросить
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {selectedCount > 0 && (
+                    <div className="flex flex-wrap items-center gap-2 mt-2 rounded-md border bg-card px-3 py-2">
+                      <Badge variant="secondary">{selectedCount}</Badge>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1.5"
+                        onClick={() => selectedSubGroup && handleCheckAllWhatsApp(selectedSubGroup.subGroupId, selectedIdList)}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Проверить
+                      </Button>
+                      <Button size="sm" variant="outline" className="gap-1.5" onClick={handleExport}>
+                        <Download className="h-3.5 w-3.5" /> Экспорт CSV
+                      </Button>
+                      <Button size="sm" variant="outline" className="gap-1.5" onClick={openMoveDialog}>
+                        <ArrowRightLeft className="h-3.5 w-3.5" /> Переместить
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        className="gap-1.5"
+                        onClick={() => setBulkDeleteOpen(true)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> Удалить
+                      </Button>
+                    </div>
+                  )}
                 </CardHeader>
                 <CardContent>
                   {!activeSubGroup && (
@@ -529,15 +763,20 @@ const Contacts = () => {
                     </p>
                   )}
                   <div className="space-y-1.5">
-                    {filteredContacts.map((c, i) => (
+                    {paginatedContacts.map((c, i) => (
                       <motion.div
                         key={c.id}
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         transition={{ delay: i * 0.02 }}
-                        className="flex items-center justify-between p-3 rounded-lg hover:bg-muted/50 transition-colors group/contact"
+                        className={`flex items-center justify-between p-3 rounded-lg hover:bg-muted/50 transition-colors group/contact ${selectedIds.has(c.id) ? "bg-accent/50" : ""}`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
+                          <Checkbox
+                            checked={selectedIds.has(c.id)}
+                            onCheckedChange={() => toggleOne(c.id)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
                           <div className="h-9 w-9 rounded-full gradient-primary flex items-center justify-center text-primary-foreground font-semibold text-xs shrink-0">
                             {c.name ? c.name.slice(0, 2).toUpperCase() : "CO"}
                           </div>
@@ -548,7 +787,7 @@ const Contacts = () => {
                             <p className="text-xs text-muted-foreground flex items-center gap-1">
                               <Phone className="h-3 w-3" /> +{c.phone}
                               {Object.keys(c.variables).length > 0 && (
-                                <span className="ml-1 text-primary/70">
+                                <span className="ml-1 text-primary/70 truncate">
                                   ·{" "}
                                   {Object.entries(c.variables)
                                     .map(([k, v]) => `${k}=${v}`)
@@ -583,6 +822,64 @@ const Contacts = () => {
                       </motion.div>
                     ))}
                   </div>
+
+                  {activeSubGroup && filteredContacts.length > 0 && (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-4 pt-4 border-t">
+                      <p className="text-xs text-muted-foreground">
+                        Показано {from}–{to} из {filteredContacts.length}
+                        {search && ` (поиск: "${search}")`}
+                      </p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setPage(1); }}>
+                          <SelectTrigger className="h-8 w-[110px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {PAGE_SIZE_OPTIONS.map((n) => (
+                              <SelectItem key={n} value={String(n)}>{n} / стр</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="h-8 w-8"
+                            disabled={safePage <= 1}
+                            onClick={() => setPage((p) => Math.max(1, Math.min(p, totalPages) - 1))}
+                          >
+                            <ChevronLeft className="h-4 w-4" />
+                          </Button>
+                          {pageNumbers.map((p, idx, arr) => {
+                            const prev = arr[idx - 1];
+                            const gap = prev !== undefined && p - prev > 1;
+                            return (
+                              <span key={p} className="flex items-center gap-1">
+                                {gap && <span className="text-muted-foreground text-xs px-0.5">…</span>}
+                                <Button
+                                  variant={p === safePage ? "default" : "outline"}
+                                  size="sm"
+                                  className="h-8 min-w-8 px-2"
+                                  onClick={() => setPage(p)}
+                                >
+                                  {p}
+                                </Button>
+                              </span>
+                            );
+                          })}
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="h-8 w-8"
+                            disabled={safePage >= totalPages}
+                            onClick={() => setPage((p) => Math.min(totalPages, Math.max(1, p) + 1))}
+                          >
+                            <ChevronRight className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </motion.div>
@@ -698,6 +995,73 @@ const Contacts = () => {
               Импортировать
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Move Dialog */}
+      <Dialog open={moveDialogOpen} onOpenChange={setMoveDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="font-display">Переместить контакты ({selectedCount})</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-2">
+            <div>
+              <Label>Группа</Label>
+              <Select value={moveTargetGroupId} onValueChange={(v) => { setMoveTargetGroupId(v); setMoveTargetSubGroupId(""); }}>
+                <SelectTrigger><SelectValue placeholder="Выберите группу" /></SelectTrigger>
+                <SelectContent>
+                  {groups.map((g) => (
+                    <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Подгруппа</Label>
+              <Select value={moveTargetSubGroupId} onValueChange={setMoveTargetSubGroupId}>
+                <SelectTrigger><SelectValue placeholder="Выберите подгруппу" /></SelectTrigger>
+                <SelectContent>
+                  {moveTargetSubGroups.map((sg) => (
+                    <SelectItem key={sg.id} value={sg.id}>
+                      {sg.name} ({sg.contacts.length})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setMoveDialogOpen(false)}>Отмена</Button>
+              <Button
+                onClick={handleBulkMove}
+                disabled={bulkMoveMutation.isPending || !moveTargetSubGroupId}
+                className="gradient-primary text-primary-foreground"
+              >
+                {bulkMoveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Переместить"}
+              </Button>
+            </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Delete Confirm */}
+      <Dialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="font-display">Удалить контакты?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Будет удалено контактов: {selectedCount}. Это действие нельзя отменить.
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkDeleteOpen(false)}>Отмена</Button>
+            <Button
+              variant="destructive"
+              onClick={() => bulkDeleteMutation.mutate(selectedIdList)}
+              disabled={bulkDeleteMutation.isPending}
+            >
+              {bulkDeleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Удалить"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </DashboardLayout>

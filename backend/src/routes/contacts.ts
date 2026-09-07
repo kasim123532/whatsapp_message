@@ -155,10 +155,53 @@ router.post("/contacts", async (req, res) => {
   }
 });
 
+// POST bulk delete contacts
+router.post("/contacts/bulk-delete", async (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: "ids array is required" });
+  }
+  try {
+    const cleanIds = [...new Set(ids.filter((id: any) => typeof id === "string"))];
+    if (cleanIds.length === 0) {
+      return res.status(400).json({ error: "ids array is required" });
+    }
+    // Delete campaign links first so deleteMany works even without DB-level cascade
+    await prisma.campaignRecipient.deleteMany({ where: { contactId: { in: cleanIds } } });
+    const result = await prisma.contact.deleteMany({ where: { id: { in: cleanIds } } });
+    res.json({ count: result.count });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST bulk move contacts to another subgroup
+router.post("/contacts/bulk-move", async (req, res) => {
+  const { ids, targetSubGroupId } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0 || !targetSubGroupId) {
+    return res.status(400).json({ error: "ids and targetSubGroupId are required" });
+  }
+  try {
+    const target = await prisma.subGroup.findUnique({ where: { id: targetSubGroupId } });
+    if (!target) {
+      return res.status(404).json({ error: "Target subgroup not found" });
+    }
+    const cleanIds = [...new Set(ids.filter((id: any) => typeof id === "string"))];
+    const result = await prisma.contact.updateMany({
+      where: { id: { in: cleanIds } },
+      data: { subGroupId: targetSubGroupId }
+    });
+    res.json({ count: result.count });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE contact
 router.delete("/contacts/:id", async (req, res) => {
   const { id } = req.params;
   try {
+    await prisma.campaignRecipient.deleteMany({ where: { contactId: id } });
     await prisma.contact.delete({ where: { id } });
     res.json({ message: "Contact deleted successfully" });
   } catch (err: any) {

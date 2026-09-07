@@ -275,7 +275,7 @@ class WhatsAppManager {
   }
 
   /** Stops the client but keeps the stored session, so the next login skips the QR. */
-  async disconnect(id: string): Promise<void> {
+  async disconnect(id: string, emitStatus = true): Promise<void> {
     console.log(`[WhatsApp] Disconnecting client for ${id}...`);
     this.clearDeadline(id);
     this.qrs.delete(id);
@@ -284,7 +284,9 @@ class WhatsAppManager {
       where: { id },
       data: { status: "DISCONNECTED" }
     });
-    this.emitStatus(id, "DISCONNECTED");
+    if (emitStatus) {
+      this.emitStatus(id, "DISCONNECTED");
+    }
   }
 
   /** Unlinks the device on the phone's side and wipes the local session. */
@@ -339,7 +341,9 @@ class WhatsAppManager {
 
   async deleteAccount(id: string): Promise<void> {
     console.log(`[WhatsApp] Deleting account and sessions for ${id}...`);
-    await this.disconnect(id);
+    // Silent: the row is about to disappear, so broadcasting DISCONNECTED for
+    // it first only makes the dashboard flicker.
+    await this.disconnect(id, false);
     this.removeSession(id);
   }
 
