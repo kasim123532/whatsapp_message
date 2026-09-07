@@ -10,6 +10,11 @@ export interface WhatsAppProfile {
   qr?: string | null;
   /** Epoch ms after which the current QR handshake is abandoned. */
   qrExpiresAt?: number | null;
+  /**
+   * Epoch ms at which the server deletes this profile for never having been
+   * scanned. Null once a phone is linked, i.e. for every real account.
+   */
+  pendingExpiresAt?: number | null;
   /** True while a headless browser is alive for this profile. */
   running?: boolean;
   /** Profiles created by the QR page, discarded again if never scanned. */

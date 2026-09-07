@@ -27,6 +27,10 @@ model Account {
   // Pacing is per account, not per campaign: an account that just sent is muted
   // until this moment, no matter which campaign wants to use it next.
   nextAvailableAt DateTime?
+  // Stamped on every connect attempt. The janitor ages a never-linked profile
+  // from here rather than `createdAt`, so refreshing the QR of an old row
+  // restarts its clock instead of deleting it out from under the scan.
+  lastAttemptAt DateTime?
   createdAt  DateTime @default(now())
 }
 

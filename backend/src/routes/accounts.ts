@@ -5,13 +5,25 @@ import { parseProxy } from "../lib/proxy.js";
 
 const router = Router();
 
+type AccountRow = {
+  id: string;
+  isDraft: boolean;
+  phone: string | null;
+  status: string;
+  lastAttemptAt: Date | null;
+  createdAt: Date;
+};
+
 /** Attaches the live (in-memory) QR state to a stored account row. */
-function withLiveState<T extends { id: string }>(account: T) {
+function withLiveState<T extends AccountRow>(account: T) {
   return {
     ...account,
     qr: wsManager.getQr(account.id) || null,
     qrExpiresAt: wsManager.getQrExpiresAt(account.id) || null,
-    running: wsManager.isRunning(account.id)
+    running: wsManager.isRunning(account.id),
+    // When this profile self-destructs for never having been scanned; null once
+    // a phone is linked to it.
+    pendingExpiresAt: wsManager.pendingDeadline(account)
   };
 }
 
@@ -48,8 +60,9 @@ router.get("/:id/status", async (req, res) => {
 });
 
 // POST create account — phone number is optional, it's discovered automatically
-// once the QR code is scanned. Pass `draft: true` for a profile that should be
-// discarded again if nobody ever scans it (the QR page does this).
+// once the QR code is scanned. A new profile is a draft by default: until a
+// phone is actually linked there is nothing in it worth keeping, so the janitor
+// collects it if nobody scans. Sharing its /connect link clears the flag.
 router.post("/", async (req, res) => {
   const { phone, name, proxy, draft } = req.body || {};
 
@@ -78,7 +91,7 @@ router.post("/", async (req, res) => {
         name: name || "",
         proxy: rawProxy,
         status: "DISCONNECTED",
-        isDraft: Boolean(draft)
+        isDraft: draft === undefined ? true : Boolean(draft)
       }
     });
 
@@ -219,8 +232,8 @@ router.post("/:id/refresh-qr", async (req, res) => {
 router.post("/:id/cancel", async (req, res) => {
   const { id } = req.params;
   try {
-    const deleted = await wsManager.cancelConnect(id);
-    res.json({ message: deleted ? "Draft discarded" : "Connection cancelled", deleted });
+    const pendingExpiresAt = await wsManager.cancelConnect(id);
+    res.json({ message: "Connection cancelled", pendingExpiresAt });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

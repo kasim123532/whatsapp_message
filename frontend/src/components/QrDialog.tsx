@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle2, RefreshCw, AlertTriangle, Copy } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
+import { formatCountdown } from "@/lib/utils";
 import { toast } from "sonner";
 import { WhatsAppProfile } from "@/types";
 
@@ -14,13 +15,6 @@ interface QrDialogProps {
   onOpenChange: (open: boolean) => void;
   /** Live profile row; the QR itself arrives over the WebSocket. */
   profile: WhatsAppProfile | null | undefined;
-}
-
-function formatCountdown(msLeft: number) {
-  const total = Math.max(0, Math.ceil(msLeft / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 /**
@@ -105,7 +99,8 @@ export function QrDialog({ open, onOpenChange, profile }: QrDialogProps) {
 
   const handleOpenChange = (next: boolean) => {
     // Closing before anyone scanned means nobody is going to — stop the headless
-    // browser instead of leaving it burning memory, and drop draft profiles.
+    // browser instead of leaving it burning memory. The profile row survives in
+    // the accounts table until its own deadline, so the code can be reopened.
     if (!next && id && !connected) {
       cancelMutation.mutate(id);
     }
@@ -195,7 +190,7 @@ export function QrDialog({ open, onOpenChange, profile }: QrDialogProps) {
               </div>
               <p className="mt-3 text-[11px] text-muted-foreground text-center">
                 {profile?.isDraft
-                  ? "Если закрыть окно до сканирования, черновик профиля будет удалён."
+                  ? "Если закрыть окно до сканирования, профиль останется в списке ещё на несколько минут, а затем удалится сам."
                   : "Если закрыть окно до сканирования, попытка подключения будет прервана."}
               </p>
             </>

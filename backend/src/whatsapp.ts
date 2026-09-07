@@ -15,8 +15,25 @@ export const whatsappEvents = new EventEmitter();
  */
 const QR_WINDOW_MS = Number(process.env.QR_WINDOW_MS) || 3 * 60 * 1000;
 
-/** Draft profiles older than this that never linked a phone are swept away. */
-const DRAFT_TTL_MS = Number(process.env.DRAFT_TTL_MS) || 15 * 60 * 1000;
+/**
+ * Grace period after the QR window closes. The profile row survives this long
+ * with its browser already gone so the dashboard can offer "обновить код" to an
+ * operator who was slow; after that the janitor deletes it. A never-linked
+ * profile therefore lives QR_WINDOW_MS + PENDING_GRACE_MS from its last attempt.
+ */
+const PENDING_GRACE_MS = Number(process.env.PENDING_GRACE_MS) || 2 * 60 * 1000;
+
+/** How often the janitor looks for never-linked profiles to collect. */
+const SWEEP_INTERVAL_MS = 30 * 1000;
+
+/** A profile row the janitor is allowed to delete. */
+type PendingLike = {
+  isDraft: boolean;
+  phone: string | null;
+  status: string;
+  lastAttemptAt: Date | null;
+  createdAt: Date;
+};
 
 const SESSIONS_ROOT = path.resolve("./sessions");
 
@@ -38,6 +55,18 @@ class WhatsAppManager {
       where: { status: "CONNECTING" },
       data: { status: "DISCONNECTED" }
     });
+
+    // Profiles that never linked a phone are disposable no matter which page
+    // created them. Older rows predate that rule and were created immortal, so
+    // hand them to the janitor rather than leaving them stuck on "ожидание QR"
+    // forever.
+    const adopted = await prisma.account.updateMany({
+      where: { isDraft: false, phone: null, status: { not: "CONNECTED" } },
+      data: { isDraft: true }
+    });
+    if (adopted.count > 0) {
+      console.log(`[WhatsApp] ${adopted.count} never-linked profiles marked disposable.`);
+    }
 
     // Only accounts that actually finished a login get resumed, and only when
     // their session folder survived. Everything else waits for a manual login.
@@ -63,10 +92,10 @@ class WhatsAppManager {
       });
     }
 
-    await this.sweepDrafts();
+    await this.sweepPending();
     this.janitor = setInterval(() => {
-      this.sweepDrafts().catch((err) => console.error("[WhatsApp] Draft sweep failed:", err));
-    }, 5 * 60 * 1000);
+      this.sweepPending().catch((err) => console.error("[WhatsApp] Pending sweep failed:", err));
+    }, SWEEP_INTERVAL_MS);
   }
 
   getClient(id: string): Client | undefined {
@@ -85,6 +114,19 @@ class WhatsAppManager {
     return this.clients.has(id);
   }
 
+  /**
+   * Moment a never-linked profile gets deleted, or null for a profile that is
+   * here to stay. The clock runs from the last connect attempt, so refreshing
+   * an expired code buys the operator a fresh full window.
+   */
+  pendingDeadline(account: PendingLike): number | null {
+    if (!account.isDraft || account.phone || account.status === "CONNECTED") {
+      return null;
+    }
+    const since = account.lastAttemptAt ?? account.createdAt;
+    return since.getTime() + QR_WINDOW_MS + PENDING_GRACE_MS;
+  }
+
   async connect(id: string): Promise<Client> {
     if (this.clients.has(id)) {
       console.log(`[WhatsApp] Client already exists for ${id}`);
@@ -99,7 +141,7 @@ class WhatsAppManager {
     console.log(`[WhatsApp] Connecting client for ${id}...`);
     await prisma.account.updateMany({
       where: { id },
-      data: { status: "CONNECTING", lastError: null }
+      data: { status: "CONNECTING", lastError: null, lastAttemptAt: new Date() }
     });
     this.emitStatus(id, "CONNECTING");
 
@@ -273,32 +315,26 @@ class WhatsAppManager {
   }
 
   /**
-   * Abandons an in-flight QR login. Draft profiles that never linked a phone are
-   * removed entirely so the account list doesn't fill up with dead rows.
-   * Returns true when the profile was deleted.
+   * Abandons an in-flight QR login: the headless browser goes away immediately
+   * so it stops burning memory, but the profile row stays. A never-linked row
+   * keeps counting down to its own deadline, which lets the operator reopen the
+   * code from the accounts table instead of re-creating the profile. Returns the
+   * moment the row will be collected, or null if it is here to stay.
    */
-  async cancelConnect(id: string): Promise<boolean> {
+  async cancelConnect(id: string): Promise<number | null> {
     this.clearDeadline(id);
     this.qrs.delete(id);
     await this.destroyClient(id);
 
     const account = await prisma.account.findUnique({ where: { id } });
-    if (!account) return false;
-
-    if (account.isDraft && account.status !== "CONNECTED" && !account.phone) {
-      this.removeSession(id);
-      await prisma.account.delete({ where: { id } });
-      whatsappEvents.emit("removed", { id });
-      console.log(`[WhatsApp] Discarded draft profile ${id}`);
-      return true;
-    }
+    if (!account) return null;
 
     await prisma.account.updateMany({
       where: { id },
       data: { status: "DISCONNECTED" }
     });
     this.emitStatus(id, "DISCONNECTED");
-    return false;
+    return this.pendingDeadline({ ...account, status: "DISCONNECTED" });
   }
 
   async deleteAccount(id: string): Promise<void> {
@@ -307,15 +343,20 @@ class WhatsAppManager {
     this.removeSession(id);
   }
 
-  /** Drops draft profiles nobody ever scanned. */
-  async sweepDrafts(): Promise<number> {
-    const cutoff = new Date(Date.now() - DRAFT_TTL_MS);
+  /** Drops profiles nobody ever scanned. */
+  async sweepPending(): Promise<number> {
+    const cutoff = new Date(Date.now() - (QR_WINDOW_MS + PENDING_GRACE_MS));
     const stale = await prisma.account.findMany({
       where: {
         isDraft: true,
         phone: null,
         status: { not: "CONNECTED" },
-        createdAt: { lt: cutoff }
+        // Age from the last attempt; rows that never got one fall back to when
+        // they were created.
+        OR: [
+          { lastAttemptAt: { lt: cutoff } },
+          { lastAttemptAt: null, createdAt: { lt: cutoff } }
+        ]
       }
     });
 
@@ -333,7 +374,7 @@ class WhatsAppManager {
     await prisma.account.deleteMany({
       where: { id: { in: abandoned.map((a) => a.id) } }
     });
-    console.log(`[WhatsApp] Swept ${abandoned.length} abandoned draft profiles.`);
+    console.log(`[WhatsApp] Swept ${abandoned.length} abandoned profiles.`);
     return abandoned.length;
   }
 
@@ -365,7 +406,7 @@ class WhatsAppManager {
       console.log(`[WhatsApp] QR window expired for ${id}`);
       whatsappEvents.emit("qr_expired", { id });
       // The browser goes away, but the profile row stays so the dashboard can
-      // offer "обновить код". If it really is abandoned, sweepDrafts collects it.
+      // offer "обновить код". If it really is abandoned, sweepPending collects it.
       this.fail(id, "QR-код устарел — его никто не отсканировал вовремя").catch((err) =>
         console.error(`[WhatsApp] Failed to clean up expired QR for ${id}:`, err)
       );
