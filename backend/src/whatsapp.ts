@@ -105,14 +105,15 @@ class WhatsAppManager {
 
     const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 
+    // `--single-process` and `--no-zygote` are deliberately absent: they make
+    // Chromium crash under long-lived Puppeteer sessions, which is exactly what
+    // a WhatsApp client is. Each account gets a normal multi-process browser.
     const puppeteerArgs = [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-accelerated-2d-canvas",
       "--no-first-run",
-      "--no-zygote",
-      "--single-process",
       "--disable-gpu"
     ];
 

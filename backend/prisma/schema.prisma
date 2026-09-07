@@ -18,8 +18,15 @@ model Account {
   isDraft    Boolean  @default(false)
   lastError  String?
   todaySent  Int      @default(0)
+  // Local calendar day (YYYY-MM-DD) that `todaySent` is counting. The scheduler
+  // zeroes the counter as soon as it sees a day it doesn't recognise, so the
+  // rollover survives restarts without needing a cron at midnight.
+  todaySentDay String?
   dailyLimit Int      @default(0)
   totalSent  Int      @default(0)
+  // Pacing is per account, not per campaign: an account that just sent is muted
+  // until this moment, no matter which campaign wants to use it next.
+  nextAvailableAt DateTime?
   createdAt  DateTime @default(now())
 }
 
@@ -94,6 +101,10 @@ model CampaignRecipient {
   contactId  String
   contact    Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
   status     String    @default("PENDING") // "PENDING", "SENT", "FAILED"
+  // A send that fails goes back to PENDING with a later `nextAttemptAt` until
+  // the attempts run out; only then does it become terminally FAILED.
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime?
   sentAt     DateTime?
   error      String?
 

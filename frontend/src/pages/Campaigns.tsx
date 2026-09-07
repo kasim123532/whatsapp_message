@@ -117,7 +117,7 @@ const Campaigns = () => {
       setSelectedId(newCamp.id);
       setDialogOpen(false);
       setForm({
-        name: "", phones: [], message: "", groupId: "", date: undefined, time: "08:00",
+        name: "", phones: [], message: "", groupId: "",
         minInterval: "60", maxInterval: "120", sendFrom: "08:00", sendTo: "20:00"
       });
       toast.success("Рассылка создана");

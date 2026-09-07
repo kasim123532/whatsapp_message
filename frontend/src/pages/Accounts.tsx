@@ -18,6 +18,7 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Proxy, WhatsAppProfile } from "@/types";
 
@@ -454,8 +455,18 @@ const Accounts = () => {
                         </Button>
                       </div>
 
-                      <span className="text-sm text-muted-foreground font-mono w-1/6 text-right">
-                        {p.todaySent} / {p.dailyLimit} / {p.totalSent}
+                      <span
+                        className={cn(
+                          "text-sm font-mono w-1/6 text-right",
+                          // A profile that has hit its daily cap stops sending
+                          // until local midnight, so make that visible.
+                          p.dailyLimit > 0 && p.todaySent >= p.dailyLimit
+                            ? "text-wa-amber font-semibold"
+                            : "text-muted-foreground"
+                        )}
+                        title="Отправлено сегодня / дневной лимит / всего"
+                      >
+                        {p.todaySent} / {p.dailyLimit > 0 ? p.dailyLimit : "∞"} / {p.totalSent}
                       </span>
                     </motion.div>
                   ))}

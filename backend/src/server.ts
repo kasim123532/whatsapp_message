@@ -5,6 +5,7 @@ import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { wsManager, whatsappEvents } from "./whatsapp.js";
 import { campaignScheduler } from "./services/scheduler.js";
+import { logTimeZoneBanner } from "./lib/time.js";
 import accountsRouter from "./routes/accounts.js";
 import contactsRouter from "./routes/contacts.js";
 import templatesRouter from "./routes/templates.js";
@@ -94,5 +95,6 @@ const startServices = async () => {
 
 server.listen(port, () => {
   console.log(`[Server] API running on http://localhost:${port}`);
+  logTimeZoneBanner();
   startServices();
 });

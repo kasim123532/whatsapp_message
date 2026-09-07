@@ -12,6 +12,9 @@ services:
       - PORT=5000
       - DATABASE_URL=file:/app/data/database.db
       - NODE_ENV=production
+      # Campaign working hours and daily send limits follow this clock. Without
+      # it the container runs on UTC and every send window is silently shifted.
+      - TZ=${TZ:-Asia/Almaty}
     restart: always
 
   frontend:

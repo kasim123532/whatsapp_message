@@ -16,8 +16,10 @@ RUN npm run build
 FROM node:20-slim
 
 # Install Chromium and dependencies for Puppeteer
+# tzdata is what lets the TZ environment variable resolve to a real zone; the
+# slim image ships without it and would silently fall back to UTC.
 RUN apt-get update && apt-get install -y \
-    chromium \
+    chromium tzdata \
     fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
