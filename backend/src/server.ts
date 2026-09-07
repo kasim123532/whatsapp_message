@@ -6,6 +6,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { wsManager, whatsappEvents } from "./whatsapp.js";
 import { campaignScheduler } from "./services/scheduler.js";
 import { logTimeZoneBanner } from "./lib/time.js";
+import { setCampaignBroadcaster } from "./lib/campaignEvents.js";
 import accountsRouter from "./routes/accounts.js";
 import contactsRouter from "./routes/contacts.js";
 import templatesRouter from "./routes/templates.js";
@@ -60,6 +61,7 @@ const broadcast = (data: any) => {
     }
   }
 };
+setCampaignBroadcaster(broadcast);
 
 // Connect WhatsApp Event Emitter to WebSockets. The payloads are forwarded as
 // they come out of the manager — every one of them is keyed by account `id`,

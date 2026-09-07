@@ -48,11 +48,11 @@ export interface Campaign {
   id: string;
   name: string;
   phone: string[];
+  accountIds?: string[];
   message: string;
   group: string;
   groupId: string;
   nextAction: string | null;
-  nextActionTime: string;
   sent: number;
   pending: number;
   failed: number;

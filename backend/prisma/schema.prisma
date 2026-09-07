@@ -79,12 +79,12 @@ model Template {
 model Campaign {
   id             String              @id @default(uuid())
   name           String
-  phones         String              @default("[]") // JSON array of sender phone numbers
+  phones         String              @default("[]") // JSON array of sender phone numbers (legacy, для отображения)
+  accountIds     String              @default("[]") // JSON array of sender Account.id — основной идентификатор
   message        String
   groupName      String              // The name of the subgroup target
   groupId        String              // The ID of the subgroup target
   nextAction     DateTime?
-  nextActionTime String              @default("08:00")
   minInterval    Int                 @default(600)
   maxInterval    Int                 @default(1200)
   sendFrom       String              @default("08:00")
@@ -93,9 +93,10 @@ model Campaign {
   pending        Int                 @default(0)
   failed         Int                 @default(0)
   isPaused       Boolean             @default(true)
-  status         String              @default("DRAFT") // "DRAFT", "SCHEDULED", "RUNNING", "PAUSED", "COMPLETED"
+  status         String              @default("DRAFT") // "DRAFT", "RUNNING", "PAUSED", "COMPLETED"
   recipients     CampaignRecipient[]
   createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 }
 
 model CampaignRecipient {
@@ -104,13 +105,19 @@ model CampaignRecipient {
   campaign   Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   contactId  String
   contact    Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  status     String    @default("PENDING") // "PENDING", "SENT", "FAILED"
+  status     String    @default("PENDING") // "PENDING", "SENDING", "SENT", "FAILED"
   // A send that fails goes back to PENDING with a later `nextAttemptAt` until
   // the attempts run out; only then does it become terminally FAILED.
+  // SENDING = атомарный клейм: строка захвачена одним воркером, второй её не возьмёт.
   attempts      Int       @default(0)
   nextAttemptAt DateTime?
+  // Кто и когда реально отправил + итоговый текст (после подстановки {{переменных}}).
+  senderAccountId String?
+  senderPhone     String?
+  sentText        String?
   sentAt     DateTime?
   error      String?
+  updatedAt  DateTime  @updatedAt
 
   @@unique([campaignId, contactId])
 }

@@ -14,7 +14,7 @@ import { Plus, Pause, Play, Trash2, MoreVertical, Download, Copy, Pencil, Archiv
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/api";
+import { apiRequest, API_URL } from "@/lib/api";
 import { toast } from "sonner";
 import { Campaign } from "@/types";
 
@@ -72,7 +72,9 @@ const Campaigns = () => {
   const { data: campaigns = [], isLoading: isCampaignsLoading } = useQuery<Campaign[]>({
     queryKey: ["campaigns"],
     queryFn: () => apiRequest("/campaigns"),
-    refetchInterval: 5000 // Poll every 5 seconds to get live status updates!
+    // Обновления прилетают по WebSocket (см. WebSocketContext: type "campaign"),
+    // поллинг оставлен редкой страховкой на случай обрыва сокета.
+    refetchInterval: 30000
   });
 
   const { data: accounts = [] } = useQuery<any[]>({
@@ -86,6 +88,10 @@ const Campaigns = () => {
   });
 
   const phoneOptions = accounts.filter(acc => acc.status === "CONNECTED").map(acc => acc.phone);
+  // Привязка сендеров к Account.id (бэк резолвит и phones-legacy, и accountIds).
+  const senderByPhone = new Map(accounts.map((a: any) => [a.phone, a.id]));
+  const phonesToIds = (phones: string[]) =>
+    phones.map((p) => senderByPhone.get(p)).filter((id): id is string => !!id);
   
   const subgroups = contactGroups.flatMap((g) =>
     g.subGroups.map((sg: any) => ({
@@ -181,6 +187,7 @@ const Campaigns = () => {
     createMutation.mutate({
       name: form.name,
       phones: form.phones,
+      accountIds: phonesToIds(form.phones),
       message: form.message,
       groupId: form.groupId,
       minInterval: parseInt(form.minInterval),
@@ -190,11 +197,20 @@ const Campaigns = () => {
     });
   };
 
+  const campaignIdsToPhones = (c: Campaign) => {
+    if (c.accountIds && c.accountIds.length > 0) {
+      const idToPhone = new Map(accounts.map((a: any) => [a.id, a.phone]));
+      const resolved = c.accountIds.map((id) => idToPhone.get(id)).filter(Boolean);
+      if (resolved.length > 0) return resolved as string[];
+    }
+    return c.phone;
+  };
+
   const openEditDialog = (c: Campaign) => {
     setEditingId(c.id);
     setEditForm({
       name: c.name,
-      phones: c.phone,
+      phones: campaignIdsToPhones(c),
       message: c.message,
       minInterval: String(c.minInterval || 60),
       maxInterval: String(c.maxInterval || 120),
@@ -224,6 +240,7 @@ const Campaigns = () => {
       data: {
         name: editForm.name,
         phones: editForm.phones,
+        accountIds: phonesToIds(editForm.phones),
         message: editForm.message,
         minInterval: min,
         maxInterval: max,
@@ -236,6 +253,34 @@ const Campaigns = () => {
   const selectedExists = selectedId !== null && campaigns.some((c) => c.id === selectedId);
   const selectedCampaignId = selectedExists ? selectedId : (campaigns.length > 0 ? campaigns[0].id : null);
   const selected = campaigns.find((c) => c.id === selectedCampaignId) || null;
+
+  // Журнал доставки выбранной кампании (обновляется по WS через ["campaign-recipients", id])
+  const { data: deliveryLog } = useQuery<{ total: number; items: any[] }>({
+    queryKey: ["campaign-recipients", selectedCampaignId],
+    queryFn: () => apiRequest(`/campaigns/${selectedCampaignId}/recipients?take=50`),
+    enabled: !!selectedCampaignId,
+    refetchInterval: 30000
+  });
+
+  const handleDownloadXlsx = async () => {
+    if (!selectedCampaignId) return;
+    try {
+      const resp = await fetch(`${API_URL}/campaigns/${selectedCampaignId}/export.xlsx`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `campaign-${selected?.name || selectedCampaignId}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Лог выгружен в XLSX");
+    } catch (e: any) {
+      toast.error(e.message || "Ошибка выгрузки XLSX");
+    }
+  };
 
   const total = (c: Campaign) => c.sent + c.pending + c.failed;
   const progress = (c: Campaign) => total(c) > 0 ? (c.sent / total(c)) * 100 : 0;
@@ -519,7 +564,10 @@ const Campaigns = () => {
                 </Card>
 
                 {/* Actions */}
-                <div className="flex gap-2 pt-3">
+                <div className="flex gap-2 pt-3 flex-wrap">
+                  <Button variant="outline" onClick={handleDownloadXlsx}>
+                    <Download className="h-4 w-4 mr-2" /> Скачать лог (XLSX)
+                  </Button>
                   <Button
                     variant="outline"
                     className="text-destructive border-destructive/30 hover:bg-destructive/10"
@@ -529,6 +577,46 @@ const Campaigns = () => {
                     <Trash2 className="h-4 w-4 mr-2" /> Удалить рассылку
                   </Button>
                 </div>
+
+                {/* Delivery log preview */}
+                <Card className="mt-3">
+                  <CardContent className="p-4">
+                    <p className="text-sm font-semibold mb-2">
+                      Журнал доставки {deliveryLog ? `(${deliveryLog.total})` : ""}
+                    </p>
+                    {!deliveryLog || deliveryLog.items.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">Пока нет отправок.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="text-left text-muted-foreground border-b">
+                              <th className="py-1 pr-2">Кому</th>
+                              <th className="py-1 pr-2">Статус</th>
+                              <th className="py-1 pr-2">С номера</th>
+                              <th className="py-1 pr-2">Когда</th>
+                              <th className="py-1 pr-2">Текст</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {deliveryLog.items.slice(0, 20).map((r: any, i: number) => (
+                              <tr key={i} className="border-b border-border/50">
+                                <td className="py-1 pr-2 font-mono">+{r.contactPhone}</td>
+                                <td className="py-1 pr-2">{r.status === "SENT" ? "дошло" : r.status === "FAILED" ? "ошибка" : "ожидает"}</td>
+                                <td className="py-1 pr-2 font-mono">{r.senderPhone ? `+${r.senderPhone}` : "—"}</td>
+                                <td className="py-1 pr-2 font-mono">{r.sentAt ? new Date(r.sentAt).toLocaleString() : "—"}</td>
+                                <td className="py-1 pr-2 max-w-[220px] truncate" title={r.text || ""}>{r.text || "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <p className="text-[11px] text-muted-foreground mt-2">
+                          Показаны последние 20. Полный лог — в XLSX.
+                        </p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
               </motion.div>
             ) : (
               <div className="flex items-center justify-center text-muted-foreground text-sm py-20">

@@ -100,6 +100,13 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                   : acc
               );
             });
+          } else if (payload.type === "campaign") {
+            // Живые обновления рассылок: сервер сам присылает событие при
+            // старте/паузе/отправке/завершении, поллинг остаётся лишь страховкой.
+            queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+            if (payload.id) {
+              queryClient.invalidateQueries({ queryKey: ["campaign-recipients", payload.id] });
+            }
           }
         } catch (err) {
           console.error("[WS] Message parsing error:", err);

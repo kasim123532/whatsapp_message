@@ -198,8 +198,30 @@ router.post("/contacts/bulk-delete", async (req, res) => {
       return res.status(400).json({ error: "ids array is required" });
     }
     // Delete campaign links first so deleteMany works even without DB-level cascade
+    const linked = await prisma.campaignRecipient.findMany({
+      where: { contactId: { in: cleanIds } },
+      select: { campaignId: true }
+    });
     await prisma.campaignRecipient.deleteMany({ where: { contactId: { in: cleanIds } } });
     const result = await prisma.contact.deleteMany({ where: { id: { in: cleanIds } } });
+    // Удаление контакта меняет состав кампаний — сверяем их счётчики с реальностью
+    const affected = [...new Set(linked.map((l) => l.campaignId))];
+    for (const campaignId of affected) {
+      const counts = await prisma.campaignRecipient.groupBy({
+        by: ["status"],
+        where: { campaignId },
+        _count: true
+      });
+      let sent = 0;
+      let failed = 0;
+      let pending = 0;
+      for (const g of counts) {
+        if (g.status === "SENT") sent += g._count;
+        else if (g.status === "FAILED") failed += g._count;
+        else pending += g._count;
+      }
+      await prisma.campaign.update({ where: { id: campaignId }, data: { sent, failed, pending } }).catch(() => undefined);
+    }
     res.json({ count: result.count });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -232,8 +254,29 @@ router.post("/contacts/bulk-move", async (req, res) => {
 router.delete("/contacts/:id", async (req, res) => {
   const { id } = req.params;
   try {
+    const linked = await prisma.campaignRecipient.findMany({
+      where: { contactId: id },
+      select: { campaignId: true }
+    });
     await prisma.campaignRecipient.deleteMany({ where: { contactId: id } });
     await prisma.contact.delete({ where: { id } });
+    const affected = [...new Set(linked.map((l) => l.campaignId))];
+    for (const campaignId of affected) {
+      const counts = await prisma.campaignRecipient.groupBy({
+        by: ["status"],
+        where: { campaignId },
+        _count: true
+      });
+      let sent = 0;
+      let failed = 0;
+      let pending = 0;
+      for (const g of counts) {
+        if (g.status === "SENT") sent += g._count;
+        else if (g.status === "FAILED") failed += g._count;
+        else pending += g._count;
+      }
+      await prisma.campaign.update({ where: { id: campaignId }, data: { sent, failed, pending } }).catch(() => undefined);
+    }
     res.json({ message: "Contact deleted successfully" });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
