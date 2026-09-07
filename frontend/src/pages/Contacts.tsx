@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -48,6 +48,13 @@ const Contacts = () => {
   const [pageSize, setPageSize] = useState(20);
   const [moveTargetGroupId, setMoveTargetGroupId] = useState("");
   const [moveTargetSubGroupId, setMoveTargetSubGroupId] = useState("");
+
+  // WhatsApp verification runs sequentially with a cancellable loop so the
+  // UI can show progress and the user can stop a 500-contact run.
+  const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set());
+  const [checkProgress, setCheckProgress] = useState<{ done: number; total: number } | null>(null);
+  const checkCancelRef = useRef(false);
+  const isChecking = checkProgress !== null;
 
   // Queries
   const { data: groups = [], isLoading } = useQuery<ContactGroup[]>({
@@ -164,6 +171,10 @@ const Contacts = () => {
     mutationFn: (contactId: string) =>
       apiRequest(`/contacts/contacts/${contactId}/check-whatsapp`, { method: "POST" }),
     onMutate: (contactId) => {
+      setCheckingIds((prev) => new Set(prev).add(contactId));
+      // Snapshot the previous status so a transient failure restores it
+      // instead of wiping a known exists/not_found back to unknown.
+      let prevStatus: Contact["whatsappStatus"] = "unknown";
       // Set status to checking instantly in client-side state cache
       queryClient.setQueryData<ContactGroup[]>(["contactGroups"], (old) => {
         if (!old) return old;
@@ -171,12 +182,17 @@ const Contacts = () => {
           ...g,
           subGroups: g.subGroups.map((sg) => ({
             ...sg,
-            contacts: sg.contacts.map((c) =>
-              c.id === contactId ? { ...c, whatsappStatus: "checking" } : c
-            )
+            contacts: sg.contacts.map((c) => {
+              if (c.id === contactId) {
+                prevStatus = c.whatsappStatus ?? "unknown";
+                return { ...c, whatsappStatus: "checking" as const };
+              }
+              return c;
+            })
           }))
         }));
       });
+      return { prevStatus };
     },
     onSuccess: (data, contactId) => {
       queryClient.setQueryData<ContactGroup[]>(["contactGroups"], (old) => {
@@ -191,12 +207,12 @@ const Contacts = () => {
           }))
         }));
       });
-      toast(data.whatsappStatus === "exists" ? "WhatsApp аккаунт найден" : "WhatsApp аккаунт не найден", {
-        icon: data.whatsappStatus === "exists" ? "✅" : "❌"
-      });
+      // No toast here: bulk runs report one summary, single checks toast
+      // via the per-call onSuccess option in handleCheckSingle.
     },
-    onError: (err: any, contactId) => {
-      // Reset back to unknown
+    onError: (err: any, contactId, context: any) => {
+      // Restore the previous known status instead of dropping to unknown
+      const prevStatus = context?.prevStatus ?? "unknown";
       queryClient.setQueryData<ContactGroup[]>(["contactGroups"], (old) => {
         if (!old) return old;
         return old.map((g) => ({
@@ -204,12 +220,19 @@ const Contacts = () => {
           subGroups: g.subGroups.map((sg) => ({
             ...sg,
             contacts: sg.contacts.map((c) =>
-              c.id === contactId ? { ...c, whatsappStatus: "unknown" } : c
+              c.id === contactId ? { ...c, whatsappStatus: prevStatus } : c
             )
           }))
         }));
       });
-      toast.error(err.message || "Ошибка верификации");
+    },
+    onSettled: (_data, _err, contactId) => {
+      setCheckingIds((prev) => {
+        if (!prev.has(contactId)) return prev;
+        const next = new Set(prev);
+        next.delete(contactId);
+        return next;
+      });
     }
   });
 
@@ -281,32 +304,117 @@ const Contacts = () => {
     });
   };
 
-  const handleCheckWhatsApp = (contactId: string) => {
-    checkWhatsAppMutation.mutate(contactId);
+  // Single per-row check with its own toast; guarded against double-run.
+  const handleCheckSingle = (contactId: string) => {
+    if (checkingIds.has(contactId)) return;
+    checkWhatsAppMutation.mutate(contactId, {
+      onSuccess: (data: { whatsappStatus: string }) => {
+        toast(data.whatsappStatus === "exists" ? "WhatsApp аккаунт найден" : "WhatsApp аккаунт не найден", {
+          icon: data.whatsappStatus === "exists" ? "✅" : "❌"
+        });
+      },
+      onError: (err: any) => {
+        toast.error(err.message || "Ошибка верификации");
+      }
+    });
   };
 
-  const handleCheckAllWhatsApp = (subGroupId: string, onlyIds?: string[]) => {
-    const subGroup = groups
-      .flatMap((g) => g.subGroups)
-      .find((sg) => sg.id === subGroupId);
+  const CHECK_STAGGER_MS = 1200;
 
-    if (!subGroup) return;
+  // Sequential cancellable loop shared by "check selected" and "check all".
+  // Returns per-run tallies; callers decide whether to split/move afterwards.
+  const runSequentialCheck = async (ids: string[]) => {
+    let found = 0;
+    let notFound = 0;
+    let failed = 0;
+    let abortedNoAccount = false;
+    for (let i = 0; i < ids.length; i++) {
+      if (checkCancelRef.current) break;
+      try {
+        const data = await checkWhatsAppMutation.mutateAsync(ids[i]);
+        if (data.whatsappStatus === "exists") found++;
+        else notFound++;
+      } catch (err: any) {
+        failed++;
+        // No point hammering the rest when there is nothing to check with
+        if (String(err?.message ?? "").includes("No connected")) {
+          abortedNoAccount = true;
+          toast.error(err.message || "Нет подключенных WhatsApp аккаунтов");
+          break;
+        }
+      }
+      setCheckProgress({ done: i + 1, total: ids.length });
+      if (i < ids.length - 1 && !checkCancelRef.current) {
+        await new Promise((r) => setTimeout(r, CHECK_STAGGER_MS));
+      }
+    }
+    return { found, notFound, failed, abortedNoAccount, cancelled: checkCancelRef.current };
+  };
 
-    const targets = onlyIds && onlyIds.length > 0
-      ? subGroup.contacts.filter((c) => onlyIds.includes(c.id))
-      : subGroup.contacts;
+  // Bulk toolbar: verify only the selected contacts, no regrouping.
+  const handleCheckSelected = async () => {
+    if (!selectedSubGroup || selectedIdList.length === 0 || isChecking) return;
+    checkCancelRef.current = false;
+    setCheckProgress({ done: 0, total: selectedIdList.length });
+    const { found, notFound, failed, cancelled } = await runSequentialCheck(selectedIdList);
+    setCheckProgress(null);
+    await queryClient.invalidateQueries({ queryKey: ["contactGroups"] });
+    if (cancelled) {
+      toast.info("Проверка отменена");
+      return;
+    }
+    toast.success(`Проверено: ${found + notFound + failed} (WA: ${found}, без WA: ${notFound}${failed > 0 ? `, ошибок: ${failed}` : ""})`);
+  };
 
+  // Header "Проверить WA": verify the whole subgroup, then split it —
+  // contacts without WA move to a sibling "<name> — без WA" subgroup
+  // (created on first use), the original keeps only WA contacts.
+  // Checking a "— без WA" subgroup moves found ones back to the base.
+  const handleCheckAndSplit = async () => {
+    if (!selectedSubGroup || !activeSubGroup || isChecking) return;
+    const targets = activeSubGroup.contacts.map((c) => c.id);
     if (targets.length === 0) {
       toast.error("Нет контактов для проверки");
       return;
     }
+    checkCancelRef.current = false;
+    setCheckProgress({ done: 0, total: targets.length });
+    const { found, notFound, failed, abortedNoAccount, cancelled } =
+      await runSequentialCheck(targets);
+    if (cancelled || abortedNoAccount) {
+      setCheckProgress(null);
+      await queryClient.invalidateQueries({ queryKey: ["contactGroups"] });
+      if (cancelled && !abortedNoAccount) toast.info("Проверка отменена");
+      return;
+    }
+    try {
+      const split = await apiRequest(
+        `/contacts/subgroups/${selectedSubGroup.subGroupId}/split-non-whatsapp`,
+        { method: "POST", body: JSON.stringify({ ids: targets }) }
+      );
+      clearSelection();
+      setPage(1);
+      await queryClient.invalidateQueries({ queryKey: ["contactGroups"] });
+      setCheckProgress(null);
+      const checked = found + notFound + failed;
+      if (split.moved > 0) {
+        toast.success(
+          `Проверено: ${checked} (WA: ${found}, без WA: ${notFound}) → ${split.moved} перемещено в «${split.targetSubGroupName}»`
+        );
+      } else {
+        toast.success(
+          `Проверено: ${checked} (WA: ${found}, без WA: ${notFound}${failed > 0 ? `, ошибок: ${failed}` : ""})`
+        );
+      }
+    } catch (err: any) {
+      setCheckProgress(null);
+      await queryClient.invalidateQueries({ queryKey: ["contactGroups"] });
+      toast.error(err.message || "Ошибка разделения подгруппы");
+    }
+  };
 
-    targets.forEach((c, i) => {
-      setTimeout(() => {
-        handleCheckWhatsApp(c.id);
-      }, i * 1500); // Stagger checks to prevent rate limits
-    });
-    toast.success(`Проверка запущена: ${targets.length}`);
+  const handleCancelCheck = () => {
+    checkCancelRef.current = true;
   };
 
   const handleDeleteContact = (contactId: string) => {
@@ -472,11 +580,23 @@ const Contacts = () => {
       case "checking":
         return <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />;
       case "exists":
-        return <CheckCircle2 className="h-4 w-4 text-primary" />;
+        return (
+          <span title="WhatsApp найден" className="inline-flex">
+            <CheckCircle2 className="h-4 w-4 text-primary" />
+          </span>
+        );
       case "not_found":
-        return <XCircle className="h-4 w-4 text-destructive" />;
+        return (
+          <span title="WhatsApp не найден" className="inline-flex">
+            <XCircle className="h-4 w-4 text-destructive" />
+          </span>
+        );
       default:
-        return null;
+        return (
+          <span title="Не проверен" className="inline-flex">
+            <span className="h-4 w-4 rounded-full border border-dashed border-muted-foreground/50" />
+          </span>
+        );
     }
   };
 
@@ -675,17 +795,29 @@ const Contacts = () => {
                         >
                           <Import className="h-3.5 w-3.5" /> Импорт
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="gap-1.5"
-                          onClick={() =>
-                            selectedSubGroup &&
-                            handleCheckAllWhatsApp(selectedSubGroup.subGroupId)
-                          }
-                        >
-                          <CheckCircle2 className="h-3.5 w-3.5" /> Проверить WA
-                        </Button>
+                        {isChecking && checkProgress ? (
+                          <div className="flex gap-1.5 items-center">
+                            <Button size="sm" variant="outline" className="gap-1.5" disabled>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              Проверка {checkProgress.done}/{checkProgress.total}
+                            </Button>
+                            <Button size="sm" variant="ghost" className="gap-1" onClick={handleCancelCheck}>
+                              <X className="h-3.5 w-3.5" /> Отмена
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="gap-1.5"
+                            disabled={!activeSubGroup || activeSubGroup.contacts.length === 0}
+                            title="Проверить все контакты подгруппы. Контакты без WhatsApp будут перемещены в подгруппу «— без WA»"
+                            onClick={handleCheckAndSplit}
+                          >
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            Проверить WA{activeSubGroup ? ` (${activeSubGroup.contacts.length})` : ""}
+                          </Button>
+                        )}
                       </div>
                     </div>
                   ) : (
@@ -729,20 +861,28 @@ const Contacts = () => {
                         size="sm"
                         variant="outline"
                         className="gap-1.5"
-                        onClick={() => selectedSubGroup && handleCheckAllWhatsApp(selectedSubGroup.subGroupId, selectedIdList)}
+                        disabled={isChecking}
+                        title="Проверить только выбранные контакты (без перемещения)"
+                        onClick={handleCheckSelected}
                       >
-                        <CheckCircle2 className="h-3.5 w-3.5" /> Проверить
+                        {isChecking ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                        )}{" "}
+                        Проверить
                       </Button>
                       <Button size="sm" variant="outline" className="gap-1.5" onClick={handleExport}>
                         <Download className="h-3.5 w-3.5" /> Экспорт CSV
                       </Button>
-                      <Button size="sm" variant="outline" className="gap-1.5" onClick={openMoveDialog}>
+                      <Button size="sm" variant="outline" className="gap-1.5" onClick={openMoveDialog} disabled={isChecking}>
                         <ArrowRightLeft className="h-3.5 w-3.5" /> Переместить
                       </Button>
                       <Button
                         size="sm"
                         variant="destructive"
                         className="gap-1.5"
+                        disabled={isChecking}
                         onClick={() => setBulkDeleteOpen(true)}
                       >
                         <Trash2 className="h-3.5 w-3.5" /> Удалить
@@ -798,18 +938,27 @@ const Contacts = () => {
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
-                          {whatsappIcon(c.whatsappStatus)}
-                          {c.whatsappStatus === "unknown" && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 opacity-0 group-hover/contact:opacity-100"
-                              onClick={() => handleCheckWhatsApp(c.id)}
-                              title="Проверить WhatsApp"
-                            >
-                              <CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />
-                            </Button>
-                          )}
+                          {c.whatsappStatus !== "checking" && whatsappIcon(c.whatsappStatus)}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground"
+                            disabled={checkingIds.has(c.id) || isChecking}
+                            onClick={() => handleCheckSingle(c.id)}
+                            title={
+                              checkingIds.has(c.id)
+                                ? "Проверка…"
+                                : c.whatsappStatus === "unknown"
+                                  ? "Проверить WhatsApp"
+                                  : "Проверить WhatsApp повторно"
+                            }
+                          >
+                            {checkingIds.has(c.id) ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            )}
+                          </Button>
                           <Button
                             variant="ghost"
                             size="icon"

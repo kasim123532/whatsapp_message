@@ -4,6 +4,37 @@ import { wsManager } from "../whatsapp.js";
 
 const router = Router();
 
+const CHECK_TIMEOUT_MS = 15000;
+const SPLIT_SUFFIX = " — без WA";
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).then(
+    (v) => {
+      clearTimeout(timer);
+      return v as T;
+    },
+    (e) => {
+      clearTimeout(timer);
+      throw e;
+    }
+  );
+}
+
+// DB rows can say CONNECTED while the browser process is gone (restart,
+// crash). The first live client wins instead of blindly taking accounts[0].
+async function getLiveClient() {
+  const accounts = await prisma.account.findMany({ where: { status: "CONNECTED" } });
+  for (const acc of accounts) {
+    const client = wsManager.getClient(acc.id);
+    if (client) return client;
+  }
+  return null;
+}
+
 // GET all groups, subgroups, and contacts
 router.get("/groups", async (req, res) => {
   try {
@@ -218,28 +249,93 @@ router.post("/contacts/:id/check-whatsapp", async (req, res) => {
       return res.status(404).json({ error: "Contact not found" });
     }
 
-    // Find any connected whatsapp client
-    const accounts = await prisma.account.findMany({ where: { status: "CONNECTED" } });
-    if (accounts.length === 0) {
+    const client = await getLiveClient();
+    if (!client) {
       return res.status(400).json({ error: "No connected WhatsApp accounts found to perform verification" });
     }
 
-    const client = wsManager.getClient(accounts[0].id);
-    if (!client) {
-      return res.status(400).json({ error: "WhatsApp service for account is not initialized or ready" });
-    }
-
     const cleanPhone = contact.phone.replace(/\D/g, "");
-    const registered = await client.isRegisteredUser(`${cleanPhone}@c.us`);
+    if (!cleanPhone) {
+      return res.status(400).json({ error: "Contact has no valid phone number" });
+    }
+    const registered = await withTimeout(
+      client.isRegisteredUser(`${cleanPhone}@c.us`),
+      CHECK_TIMEOUT_MS,
+      "WhatsApp verification timed out"
+    );
 
     const status = registered ? "exists" : "not_found";
-    
+
     await prisma.contact.update({
       where: { id },
       data: { whatsappStatus: status }
     });
 
     res.json({ whatsappStatus: status });
+  } catch (err: any) {
+    console.error(`[contacts] check-whatsapp failed:`, err?.message ?? err);
+    res.status(500).json({ error: "WhatsApp verification failed, try again" });
+  }
+});
+
+// POST split a subgroup by WhatsApp presence:
+// - a normal subgroup moves its `not_found` contacts into a sibling
+//   "<name> — без WA" subgroup (created on first use, reused afterwards);
+// - a "— без WA" subgroup moves its `exists` contacts back into the base
+//   "<name>" subgroup, so re-checking either side restores the invariant
+//   "original holds only WA contacts".
+// Body: { ids?: string[] } restricts the split to the given contacts
+// (e.g. the ones just verified); omitted means all contacts of the subgroup.
+router.post("/subgroups/:id/split-non-whatsapp", async (req, res) => {
+  const { id } = req.params;
+  const { ids } = req.body ?? {};
+  try {
+    const sub = await prisma.subGroup.findUnique({
+      where: { id },
+      include: { contacts: { select: { id: true, whatsappStatus: true } } }
+    });
+    if (!sub) {
+      return res.status(404).json({ error: "Subgroup not found" });
+    }
+
+    const isNoWaPile = sub.name.endsWith(SPLIT_SUFFIX);
+    const wantedStatus = isNoWaPile ? "exists" : "not_found";
+    let candidates = sub.contacts.filter((c) => c.whatsappStatus === wantedStatus);
+    if (Array.isArray(ids) && ids.length > 0) {
+      const only = new Set(ids.filter((v: any) => typeof v === "string"));
+      candidates = candidates.filter((c) => only.has(c.id));
+    }
+    if (candidates.length === 0) {
+      return res.json({ moved: 0, targetSubGroupId: null, targetSubGroupName: null });
+    }
+
+    const targetName = isNoWaPile
+      ? sub.name.slice(0, -SPLIT_SUFFIX.length).trim() || sub.name
+      : `${sub.name}${SPLIT_SUFFIX}`;
+
+    let target = await prisma.subGroup.findFirst({
+      where: { groupId: sub.groupId, name: targetName }
+    });
+    if (!target) {
+      target = await prisma.subGroup.create({
+        data: { name: targetName, groupId: sub.groupId }
+      });
+    }
+    if (target.id === sub.id) {
+      return res.json({ moved: 0, targetSubGroupId: target.id, targetSubGroupName: target.name });
+    }
+
+    const result = await prisma.contact.updateMany({
+      where: { id: { in: candidates.map((c) => c.id) } },
+      data: { subGroupId: target.id }
+    });
+
+    res.json({
+      moved: result.count,
+      targetSubGroupId: target.id,
+      targetSubGroupName: target.name,
+      direction: isNoWaPile ? "has-wa" : "non-wa"
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
