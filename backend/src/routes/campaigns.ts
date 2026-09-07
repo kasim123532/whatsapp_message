@@ -7,6 +7,25 @@ const router = Router();
 
 const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
+/** WhatsApp text limit; larger bodies are rejected before they hit SQLite. */
+const MAX_MESSAGE_LENGTH = 65536;
+const MAX_NAME_LENGTH = 200;
+/** XLSX export streams rows into memory — cap it instead of OOMing. */
+const MAX_EXPORT_ROWS = 20000;
+
+/**
+ * Neutralises CSV/XLSX formula injection: a cell starting with =,+,-,@
+ * executes on open in Excel/Sheets. Prefixing with ' forces text mode.
+ */
+function xlsxSafe(value: unknown): string {
+  const s = String(value ?? "");
+  return /^[=+\-@]/.test(s.trimStart()) ? `'${s}` : s;
+}
+
+function cleanText(value: unknown, max: number): string {
+  return String(value ?? "").trim().slice(0, max);
+}
+
 function parseJsonArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((v) => typeof v === "string");
   if (typeof value === "string") {
@@ -151,7 +170,8 @@ router.get("/:id/recipients", async (req, res) => {
         sentAt: r.sentAt,
         attempts: r.attempts,
         error: r.error,
-        text: r.sentText
+        text: r.sentText,
+        messageId: (r as any).sentMsgId ?? null
       }))
     });
   } catch (err: any) {
@@ -169,7 +189,8 @@ router.get("/:id/export.xlsx", async (req, res) => {
     const rows = await prisma.campaignRecipient.findMany({
       where: { campaignId: id },
       include: { contact: { select: { name: true, phone: true } } },
-      orderBy: { contact: { phone: "asc" } }
+      orderBy: { contact: { phone: "asc" } },
+      take: MAX_EXPORT_ROWS
     });
 
     const wb = new ExcelJS.Workbook();
@@ -184,24 +205,30 @@ router.get("/:id/export.xlsx", async (req, res) => {
       { header: "Время отправки", key: "sentAt", width: 22 },
       { header: "Попыток", key: "attempts", width: 10 },
       { header: "Ошибка", key: "error", width: 30 },
-      { header: "Текст сообщения", key: "text", width: 60 }
+      { header: "Текст сообщения", key: "text", width: 60 },
+      { header: "ID сообщения", key: "messageId", width: 40 }
     ];
     for (const r of rows) {
       ws.addRow({
-        name: r.contact.name ?? "",
-        phone: r.contact.phone ?? "",
+        name: xlsxSafe(r.contact.name ?? ""),
+        phone: xlsxSafe(r.contact.phone ?? ""),
         status: r.status,
         delivered: r.status === "SENT" ? "да" : "нет",
-        sender: r.senderPhone ?? "",
+        sender: xlsxSafe(r.senderPhone ?? ""),
         sentAt: r.sentAt ? r.sentAt.toISOString() : "",
         attempts: r.attempts,
-        error: r.error ?? "",
-        text: r.sentText ?? ""
+        error: xlsxSafe(r.error ?? ""),
+        text: xlsxSafe(r.sentText ?? ""),
+        messageId: xlsxSafe((r as any).sentMsgId ?? "")
       });
     }
     ws.getRow(1).font = { bold: true };
 
-    const safeName = campaign.name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 50) || "campaign";
+    // Whitelist filename chars and quote it — campaign names are user input.
+    const safeName =
+      campaign.name
+        .replace(/[^a-zA-Z0-9-_а-яА-ЯёЁ]/g, "_")
+        .slice(0, 50) || "campaign";
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="campaign-${safeName}-${id.slice(0, 8)}.xlsx"`);
     await wb.xlsx.write(res);
@@ -217,6 +244,12 @@ router.post("/", async (req, res) => {
 
   if (!name || !message || !groupId || (!phones && !accountIds)) {
     return res.status(400).json({ error: "Missing required fields (name, phones|accountIds, message, groupId)" });
+  }
+  if (String(name).length > MAX_NAME_LENGTH) {
+    return res.status(400).json({ error: `Name must be at most ${MAX_NAME_LENGTH} characters` });
+  }
+  if (String(message).length > MAX_MESSAGE_LENGTH) {
+    return res.status(400).json({ error: `Message must be at most ${MAX_MESSAGE_LENGTH} characters` });
   }
 
   const iv = validateIntervals(minInterval ?? 600, maxInterval ?? 1200);
@@ -275,6 +308,12 @@ router.put("/:id", async (req, res) => {
 
   if (!name || !message || (!phones && !accountIds)) {
     return res.status(400).json({ error: "Missing required fields (name, phones|accountIds, message)" });
+  }
+  if (String(name).length > MAX_NAME_LENGTH) {
+    return res.status(400).json({ error: `Name must be at most ${MAX_NAME_LENGTH} characters` });
+  }
+  if (String(message).length > MAX_MESSAGE_LENGTH) {
+    return res.status(400).json({ error: `Message must be at most ${MAX_MESSAGE_LENGTH} characters` });
   }
   const iv = validateIntervals(minInterval, maxInterval);
   if ("error" in iv) return res.status(400).json({ error: iv.error });

@@ -6,6 +6,39 @@ const router = Router();
 
 const CHECK_TIMEOUT_MS = 15000;
 const SPLIT_SUFFIX = " — без WA";
+/** DoS caps for unbounded array/object inputs. */
+const MAX_BULK_IDS = 500;
+const MAX_BULK_IMPORT = 2000;
+const MAX_BULK_LINES = 2000;
+
+/** E.164 range: national numbers are 7–15 digits. Returns null when invalid. */
+function cleanPhoneNumber(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const digits = String(value).replace(/\D/g, "");
+  if (digits.length < 7 || digits.length > 15) return null;
+  return digits;
+}
+
+function parseVarsObject(raw: unknown): Record<string, string> {
+  if (typeof raw === "object" && raw !== null) return raw as Record<string, string>;
+  if (typeof raw !== "string" || !raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseVarsArray(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timer: NodeJS.Timeout;
@@ -60,7 +93,8 @@ router.get("/groups", async (req, res) => {
           id: c.id,
           name: c.name || "",
           phone: c.phone,
-          variables: JSON.parse(c.variables || "{}"),
+          // One corrupt variables cell must not kill the whole listing.
+          variables: parseVarsObject(c.variables),
           whatsappStatus: c.whatsappStatus
         }))
       }))
@@ -147,10 +181,14 @@ router.post("/contacts", async (req, res) => {
 
     if (contacts && Array.isArray(contacts)) {
       // Bulk Import
+      if (contacts.length > MAX_BULK_IMPORT) {
+        return res.status(400).json({ error: `Too many contacts at once (max ${MAX_BULK_IMPORT})` });
+      }
       const createdContacts = [];
       for (const item of contacts) {
-        if (!item.phone) continue;
-        const cleanPhone = item.phone.replace(/\D/g, "");
+        if (!item || typeof item.phone === "undefined") continue;
+        const cleanPhone = cleanPhoneNumber(item.phone);
+        if (!cleanPhone) continue;
         const newContact = await prisma.contact.create({
           data: {
             name: item.name || "",
@@ -165,11 +203,11 @@ router.post("/contacts", async (req, res) => {
       return res.status(201).json({ count: createdContacts.length });
     } else {
       // Single contact creation
-      if (!phone) {
-        return res.status(400).json({ error: "Phone number is required for a single contact" });
+      const cleanPhone = cleanPhoneNumber(phone);
+      if (!cleanPhone) {
+        return res.status(400).json({ error: "A valid phone number is required (7–15 digits)" });
       }
 
-      const cleanPhone = phone.replace(/\D/g, "");
       const contact = await prisma.contact.create({
         data: {
           name: name || "",
@@ -191,6 +229,9 @@ router.post("/contacts/bulk-delete", async (req, res) => {
   const { ids } = req.body;
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ error: "ids array is required" });
+  }
+  if (ids.length > MAX_BULK_IDS) {
+    return res.status(400).json({ error: `Too many ids at once (max ${MAX_BULK_IDS})` });
   }
   try {
     const cleanIds = [...new Set(ids.filter((id: any) => typeof id === "string"))];
@@ -233,6 +274,9 @@ router.post("/contacts/bulk-move", async (req, res) => {
   const { ids, targetSubGroupId } = req.body;
   if (!Array.isArray(ids) || ids.length === 0 || !targetSubGroupId) {
     return res.status(400).json({ error: "ids and targetSubGroupId are required" });
+  }
+  if (ids.length > MAX_BULK_IDS) {
+    return res.status(400).json({ error: `Too many ids at once (max ${MAX_BULK_IDS})` });
   }
   try {
     const target = await prisma.subGroup.findUnique({ where: { id: targetSubGroupId } });

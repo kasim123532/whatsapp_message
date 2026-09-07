@@ -9,8 +9,8 @@ const MAX_ATTEMPTS = Number(process.env.MAX_SEND_ATTEMPTS) || 3;
 /** First retry waits this long; each further retry doubles it. */
 const RETRY_BASE_MS = Number(process.env.RETRY_BASE_MS) || 5 * 60 * 1000;
 
-/** SENDING старше этого считается зависшим (упал воркер) и возвращается в PENDING. */
-const STALE_SENDING_MS = Number(process.env.STALE_SENDING_MS) || 10 * 60 * 1000;
+/** SENDING старше этого считается зависшим (упал воркер) и помечается для разбора. */
+const STALE_SENDING_MS = Number(process.env.STALE_SENDING_MS) || 5 * 60 * 1000;
 
 function parseIds(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string");
@@ -39,6 +39,10 @@ class CampaignScheduler {
   start() {
     if (this.timer) return;
     console.log("[Scheduler] Campaign engine started.");
+    // Immediate first tick so a restart recovers stale SENDING rows within
+    // seconds instead of waiting out the interval. Sends are still gated on
+    // live CONNECTED clients, so nothing fires before WhatsApp is back.
+    void this.tick().catch((err) => console.error("[Scheduler] Error in initial tick:", err));
     this.timer = setInterval(() => this.tick(), 5000); // Check every 5 seconds
   }
 
@@ -83,16 +87,57 @@ class CampaignScheduler {
     }
   }
 
-  /** Возвращает зависшие SENDING (воркер упал между клеймом и отправкой) обратно в очередь. */
+  /**
+   * Разбирает зависшие SENDING (воркер упал между клеймом и записью SENT).
+   * Такая строка, возможно, уже ушла в WhatsApp — слепой возврат в PENDING
+   * давал silent-дубли. Поэтому: попытки исчерпаны → FAILED, иначе PENDING
+   * с пометкой о возможном дубле и потраченной попыткой, чтобы повтор был
+   * виден в журнале, а не выглядел как обычная очередь.
+   */
   private async releaseStaleSending() {
     const cutoff = new Date(Date.now() - STALE_SENDING_MS);
-    const released = await prisma.campaignRecipient.updateMany({
+    const stale = await prisma.campaignRecipient.findMany({
       where: { status: "SENDING", updatedAt: { lt: cutoff } },
-      data: { status: "PENDING" }
+      select: { id: true, attempts: true, campaignId: true }
     });
-    if (released.count > 0) {
-      console.log(`[Scheduler] Released ${released.count} stale SENDING recipient(s) back to PENDING.`);
+    if (stale.length === 0) return;
+    let requeued = 0;
+    let writtenOff = 0;
+    for (const row of stale) {
+      const attempts = row.attempts + 1;
+      if (attempts < MAX_ATTEMPTS) {
+        await prisma.campaignRecipient.update({
+          where: { id: row.id },
+          data: {
+            status: "PENDING",
+            attempts,
+            nextAttemptAt: new Date(Date.now() + RETRY_BASE_MS),
+            error: "Прервано перезапуском во время отправки — проверьте получение перед повтором (возможен дубль)"
+          }
+        });
+        requeued++;
+      } else {
+        await prisma.campaignRecipient.update({
+          where: { id: row.id },
+          data: {
+            status: "FAILED",
+            attempts,
+            nextAttemptAt: null,
+            error: "Прервано перезапуском во время отправки, попытки исчерпаны — проверьте получение вручную"
+          }
+        });
+        writtenOff++;
+        await prisma.campaign
+          .update({
+            where: { id: row.campaignId },
+            data: { failed: { increment: 1 }, pending: { decrement: 1 } }
+          })
+          .catch(() => undefined);
+      }
     }
+    console.log(
+      `[Scheduler] Recovered ${stale.length} interrupted SENDING recipient(s): ${requeued} requeued, ${writtenOff} failed.`
+    );
   }
 
   private async processCampaign(campaign: any) {
@@ -231,12 +276,20 @@ class CampaignScheduler {
 
     let sentSuccess = false;
     let errorMsg = "";
+    let sentMsgId: string | null = null;
 
     try {
       const formattedPhone = recipient.contact.phone.replace(/\D/g, "");
       const whatsappId = `${formattedPhone}@c.us`;
-      await client.sendMessage(whatsappId, finalMessage);
+      const msg = await client.sendMessage(whatsappId, finalMessage);
       sentSuccess = true;
+      try {
+        const rawId = (msg as any)?.id;
+        sentMsgId =
+          typeof rawId === "string" ? rawId : typeof rawId?._serialized === "string" ? rawId._serialized : null;
+      } catch {
+        sentMsgId = null;
+      }
     } catch (err: any) {
       console.error(`[Scheduler] Send failed to ${recipient.contact.phone}:`, err.message);
       errorMsg = err.message || "Unknown error";
@@ -268,7 +321,8 @@ class CampaignScheduler {
           error: null,
           senderAccountId: sender.id,
           senderPhone: sender.phone,
-          sentText: finalMessage
+          sentText: finalMessage,
+          ...(sentMsgId ? { sentMsgId } : {})
         }
       });
       await prisma.campaign.update({
@@ -323,7 +377,10 @@ class CampaignScheduler {
     if (contact.name && !contactVars.name) contactVars.name = contact.name;
     let finalMessage = template;
     for (const [key, value] of Object.entries(contactVars)) {
-      const regex = new RegExp(`\\{\\{${key}\\}\\}`, "gi");
+      // Ключи приходят из данных контакта — экранируем перед RegExp, иначе
+      // ключ вроде "a)b" роняет replace, а crafted-ключ даёт ReDoS.
+      const safeKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`\\{\\{${safeKey}\\}\\}`, "gi");
       finalMessage = finalMessage.replace(regex, value || "");
     }
     return finalMessage.replace(/\{\{\w+\}\}/g, "");

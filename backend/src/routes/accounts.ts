@@ -170,7 +170,11 @@ router.post(
 
     let cleanPhone: string | null = null;
     if (phone && String(phone).trim()) {
-      cleanPhone = String(phone).replace(/\D/g, "");
+      const digits = String(phone).replace(/\D/g, "");
+      if (digits.length < 7 || digits.length > 15) {
+        return res.status(400).json({ error: "Phone must contain 7–15 digits" });
+      }
+      cleanPhone = digits;
       const existing = await prisma.account.findUnique({
         where: { phone: cleanPhone }
       });

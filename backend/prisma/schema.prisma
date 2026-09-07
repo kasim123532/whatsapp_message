@@ -115,6 +115,9 @@ model CampaignRecipient {
   senderAccountId String?
   senderPhone     String?
   sentText        String?
+  // WhatsApp message id (client.sendMessage result) — recorded on success so a
+  // crash between the send and the SENT write stays visible instead of silent.
+  sentMsgId  String?
   sentAt     DateTime?
   error      String?
   updatedAt  DateTime  @updatedAt @default(now())

@@ -16,6 +16,13 @@ services:
       # it the container runs on UTC and every send window is silently shifted.
       - TZ=${TZ:-Asia/Almaty}
     restart: always
+    healthcheck:
+      # node:20-slim has no curl/wget — use node's own fetch against /health.
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:'+(process.env.PORT||5000)+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
 
   frontend:
     build:
@@ -24,8 +31,15 @@ services:
     ports:
       - "4628:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   backend-sessions:

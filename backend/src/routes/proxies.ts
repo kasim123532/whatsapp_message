@@ -28,6 +28,9 @@ router.post("/", async (req, res) => {
   if (lines.length === 0) {
     return res.status(400).json({ error: "No proxies found in text" });
   }
+  if (lines.length > 2000) {
+    return res.status(400).json({ error: "Too many lines at once (max 2000)" });
+  }
 
   // Reject unparseable lines here rather than letting them fail later inside a
   // headless browser launch, where the cause is much harder to see.

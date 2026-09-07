@@ -3,6 +3,19 @@ import { prisma } from "../db.js";
 
 const router = Router();
 
+const MAX_NAME_LENGTH = 200;
+const MAX_BODY_LENGTH = 65536;
+
+function parseVarsArray(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 // GET all templates
 router.get("/", async (req, res) => {
   try {
@@ -11,7 +24,8 @@ router.get("/", async (req, res) => {
       id: t.id,
       name: t.name,
       body: t.body,
-      variables: JSON.parse(t.variables || "[]")
+      // One corrupt variables cell must not kill the whole listing.
+      variables: parseVarsArray(t.variables)
     }));
     res.json(mapped);
   } catch (err: any) {
@@ -24,6 +38,12 @@ router.post("/", async (req, res) => {
   const { name, body, variables } = req.body;
   if (!name || !body) {
     return res.status(400).json({ error: "Name and body are required" });
+  }
+  if (String(name).length > MAX_NAME_LENGTH) {
+    return res.status(400).json({ error: `Name must be at most ${MAX_NAME_LENGTH} characters` });
+  }
+  if (String(body).length > MAX_BODY_LENGTH) {
+    return res.status(400).json({ error: `Body must be at most ${MAX_BODY_LENGTH} characters` });
   }
 
   try {
@@ -39,7 +59,7 @@ router.post("/", async (req, res) => {
       id: template.id,
       name: template.name,
       body: template.body,
-      variables: JSON.parse(template.variables)
+      variables: parseVarsArray(template.variables)
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -50,6 +70,13 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   const { id } = req.params;
   const { name, body, variables } = req.body;
+
+  if (name !== undefined && String(name).length > MAX_NAME_LENGTH) {
+    return res.status(400).json({ error: `Name must be at most ${MAX_NAME_LENGTH} characters` });
+  }
+  if (body !== undefined && String(body).length > MAX_BODY_LENGTH) {
+    return res.status(400).json({ error: `Body must be at most ${MAX_BODY_LENGTH} characters` });
+  }
 
   try {
     const updated = await prisma.template.update({
@@ -65,7 +92,7 @@ router.put("/:id", async (req, res) => {
       id: updated.id,
       name: updated.name,
       body: updated.body,
-      variables: JSON.parse(updated.variables)
+      variables: parseVarsArray(updated.variables)
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
