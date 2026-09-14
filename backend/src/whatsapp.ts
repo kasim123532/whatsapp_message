@@ -43,6 +43,20 @@ const PINNED_WEB_VERSION = "2.3000.1046948731";
 const INIT_MAX_RETRIES = 2;
 const INIT_RETRY_BACKOFF_MS = [2000, 5000];
 
+/**
+ * A `disconnected: LOGOUT/ban` is usually permanent (needs a fresh QR), but a
+ * flaky network can also surface a spurious LOGOUT right after `ready` (as on
+ * 2026-09-08 when 77713567919 authed 4x then LOGOUT 0.4s later). So retry a
+ * few times with backoff, then park the account instead of looping forever.
+ */
+const LOGOUT_MAX_RETRIES = Number(process.env.LOGOUT_MAX_RETRIES) || 3;
+const LOGOUT_RETRY_BACKOFF_MS = [5000, 15000, 60000];
+
+/** Reasons that mean the phone unlinked/banned us — needs manual QR, not a tight reconnect loop. */
+function isPermanentDisconnectReason(reason: unknown): boolean {
+  return typeof reason === "string" && /logout|ban|conflict|multidevice|unlink|removed|401|403|405/i.test(reason);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -85,6 +99,10 @@ class WhatsAppManager {
   private generation = new Map<string, number>();
   /** In-flight client.destroy() promises, so a new launch waits for teardown. */
   private destroyPromises = new Map<string, Promise<void>>();
+  /** Consecutive LOGOUT/ban reconnect attempts per account (reset on ready). */
+  private logoutRetries = new Map<string, number>();
+  /** Pending LOGOUT retry timers per account (cleared on manual ops). */
+  private logoutTimers = new Map<string, NodeJS.Timeout>();
 
   async init() {
     // A CONNECTING row means the process died mid-handshake — there is no live
@@ -107,7 +125,9 @@ class WhatsAppManager {
     }
 
     // Only accounts that actually finished a login get resumed, and only when
-    // their session folder survived. Everything else waits for a manual login.
+    // their session folder survived. BANNED/LOGOUT accounts stay parked for a
+    // manual QR scan — auto-reconnecting them just burns browsers and risks
+    // another instant LOGOUT crash loop.
     const activeAccounts = await prisma.account.findMany({
       where: { status: "CONNECTED" }
     });
@@ -191,7 +211,7 @@ class WhatsAppManager {
    */
   private isTransientInitError(err: unknown): boolean {
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    return /Execution context was destroyed|Target closed|Session closed|Protocol error|Navigation failed|net::ERR_|Timed out/i.test(
+    return /detached Frame|Execution context was destroyed|Target closed|Session closed|Protocol error|Navigation failed|Connection closed|net::ERR_|Timed out/i.test(
       msg
     );
   }
@@ -359,6 +379,9 @@ class WhatsAppManager {
       console.log(`[WhatsApp] Client is ready for ${id}`);
       this.clearDeadline(id);
       this.qrs.delete(id);
+      // Healthy again — reset the LOGOUT backoff counter.
+      this.logoutRetries.delete(id);
+      this.clearLogoutTimer(id);
 
       const whatsappInfo = client.info;
       const connectedName = whatsappInfo?.pushname || "WhatsApp Account";
@@ -403,13 +426,24 @@ class WhatsAppManager {
       if (gen !== this.currentGen(id)) return;
       console.log(`[WhatsApp] Client disconnected for ${id}:`, reason);
       // WhatsApp reports an unlinked or blocked device by tearing the session down.
-      const banned = typeof reason === "string" && /ban|conflict/i.test(reason);
-      await this.fail(
-        id,
-        `Соединение разорвано: ${reason}`,
-        banned ? "BANNED" : "DISCONNECTED",
-        gen
-      );
+      // LOGOUT included: it means the companion device was removed/banned and a
+      // tight reconnect loop would just burn browsers, so retry 3x then park.
+      const permanent = isPermanentDisconnectReason(reason);
+      try {
+        await this.fail(
+          id,
+          `Соединение разорвано: ${reason}`,
+          permanent ? "BANNED" : "DISCONNECTED",
+          gen
+        );
+      } catch (err) {
+        // fail() never throws by contract, but a disconnected handler must
+        // never let a rejection escape into whatsapp-web.js internals.
+        console.error(`[WhatsApp] disconnected handler failed for ${id}:`, err);
+      }
+      if (permanent) {
+        this.scheduleLogoutRetry(id, String(reason));
+      }
     });
 
     this.armDeadline(id, gen);
@@ -447,6 +481,8 @@ class WhatsAppManager {
     this.nextGen(id);
     this.pending.delete(id);
     this.clearDeadline(id);
+    this.clearLogoutTimer(id);
+    this.logoutRetries.delete(id);
     this.qrs.delete(id);
     await this.destroyClient(id);
     await prisma.account.updateMany({
@@ -464,6 +500,8 @@ class WhatsAppManager {
     this.nextGen(id);
     this.pending.delete(id);
     this.clearDeadline(id);
+    this.clearLogoutTimer(id);
+    this.logoutRetries.delete(id);
     this.qrs.delete(id);
 
     const client = this.clients.get(id);
@@ -498,6 +536,8 @@ class WhatsAppManager {
     this.nextGen(id);
     this.pending.delete(id);
     this.clearDeadline(id);
+    this.clearLogoutTimer(id);
+    this.logoutRetries.delete(id);
     this.qrs.delete(id);
     await this.destroyClient(id);
 
@@ -567,12 +607,63 @@ class WhatsAppManager {
     }
     this.clearDeadline(id);
     this.qrs.delete(id);
-    await this.destroyClient(id);
-    await prisma.account.updateMany({
-      where: { id },
-      data: { status, lastError: message }
-    });
-    whatsappEvents.emit("status", { id, status, phone: null, error: message });
+    try {
+      await this.destroyClient(id);
+    } catch (err) {
+      // destroyClient already logs; a teardown must never break the caller.
+      console.error(`[WhatsApp] destroyClient failed for ${id}:`, err);
+    }
+    try {
+      await prisma.account.updateMany({
+        where: { id },
+        data: { status, lastError: message }
+      });
+    } catch (err) {
+      console.error(`[WhatsApp] Could not record failure for ${id}:`, err);
+    }
+    try {
+      whatsappEvents.emit("status", { id, status, phone: null, error: message });
+    } catch (err) {
+      console.error(`[WhatsApp] Could not emit failure status for ${id}:`, err);
+    }
+  }
+
+  /**
+   * Retries a LOGOUT/ban reconnect with backoff, then parks the account for a
+   * manual QR scan. Only this account's timer runs — other sessions are never
+   * touched, which is the per-account isolation that stops a mass logout.
+   */
+  private scheduleLogoutRetry(id: string, reason: string) {
+    this.clearLogoutTimer(id);
+    const attempt = (this.logoutRetries.get(id) ?? 0) + 1;
+    if (attempt > LOGOUT_MAX_RETRIES) {
+      console.log(
+        `[WhatsApp] ${id} hit LOGOUT ${attempt - 1}/${LOGOUT_MAX_RETRIES} retries (${reason}) — parked, needs manual QR.`
+      );
+      this.logoutRetries.delete(id);
+      return;
+    }
+    this.logoutRetries.set(id, attempt);
+    const delay = LOGOUT_RETRY_BACKOFF_MS[attempt - 1] ?? 60000;
+    console.log(`[WhatsApp] Scheduling LOGOUT retry ${attempt}/${LOGOUT_MAX_RETRIES} for ${id} in ${delay}ms.`);
+    const timer = setTimeout(() => {
+      this.logoutTimers.delete(id);
+      // Manual disconnect/logout/cancel/delete or a fresh ready() cancels this.
+      if (this.clients.has(id) || this.pending.has(id)) return;
+      console.log(`[WhatsApp] LOGOUT retry ${attempt}/${LOGOUT_MAX_RETRIES} for ${id}...`);
+      this.connect(id).catch((err) => {
+        console.error(`[WhatsApp] LOGOUT retry ${attempt} failed for ${id}:`, err);
+      });
+    }, delay);
+    this.logoutTimers.set(id, timer);
+  }
+
+  private clearLogoutTimer(id: string) {
+    const timer = this.logoutTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.logoutTimers.delete(id);
+    }
   }
 
   private deadlineFor(id: string): number {
@@ -673,6 +764,14 @@ class WhatsAppManager {
     const client = this.clients.get(id);
     this.clients.delete(id);
     if (!client) return;
+    // Detach our handlers first: whatsapp-web.js can emit late `disconnected`
+    // / `ready` callbacks while destroy() closes the page, and those must not
+    // resurrect state or throw into a half-closed browser.
+    try {
+      client.removeAllListeners();
+    } catch (err) {
+      console.error(`[WhatsApp] Could not detach listeners for ${id}:`, err);
+    }
     const p = (async () => {
       try {
         await client.destroy();

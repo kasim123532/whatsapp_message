@@ -1,4 +1,5 @@
 import { Router } from "express";
+import ExcelJS from "exceljs";
 import { prisma } from "../db.js";
 import { wsManager } from "../whatsapp.js";
 
@@ -424,6 +425,103 @@ router.post("/subgroups/:id/split-non-whatsapp", async (req, res) => {
       direction: isNoWaPile ? "has-wa" : "non-wa"
     });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Max contacts in one XLSX export. */
+const MAX_EXPORT_ROWS = 10000;
+
+/** Neutralizes Excel formula injection: cells starting with =,+,-,@ run code on open. */
+function xlsxSafe(value: unknown): string {
+  const s = String(value ?? "");
+  return /^[=+\-@]/.test(s) ? `'${s}` : s;
+}
+
+function sortedVarKeys(vars: Record<string, string>): string[] {
+  return Object.keys(vars).sort((a, b) => {
+    const na = parseInt(a.replace("field_", ""), 10) || 0;
+    const nb = parseInt(b.replace("field_", ""), 10) || 0;
+    return na - nb;
+  });
+}
+
+// POST export a subgroup (or selected contacts) as XLSX.
+// Body: { ids?: string[] } restricts the export to the given contacts
+// (e.g. the current selection/filter); omitted means the whole subgroup.
+// Columns mirror the CSV export: phone + field_1..field_N, plus name and
+// WhatsApp status. Unicode-safe by construction (real .xlsx, no CSV mojibake).
+router.post("/subgroups/:id/export.xlsx", async (req, res) => {
+  const { id } = req.params;
+  const { ids } = req.body ?? {};
+  try {
+    const sub = await prisma.subGroup.findUnique({ where: { id } });
+    if (!sub) {
+      return res.status(404).json({ error: "Subgroup not found" });
+    }
+
+    const onlyIds =
+      Array.isArray(ids) && ids.length > 0
+        ? [...new Set(ids.filter((v: any) => typeof v === "string"))].slice(0, MAX_EXPORT_ROWS)
+        : null;
+
+    const contacts = await prisma.contact.findMany({
+      where: onlyIds ? { id: { in: onlyIds }, subGroupId: id } : { subGroupId: id },
+      orderBy: { phone: "asc" },
+      take: MAX_EXPORT_ROWS
+    });
+    if (contacts.length === 0) {
+      return res.status(400).json({ error: "Нет контактов для экспорта" });
+    }
+
+    const parsed = contacts.map((c) => ({ contact: c, vars: parseVarsObject(c.variables) }));
+    const width = Math.max(...parsed.map((p) => sortedVarKeys(p.vars).length));
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "whatsapp-sender";
+    const ws = wb.addWorksheet("contacts");
+    ws.columns = [
+      { header: "Имя", key: "name", width: 24 },
+      { header: "Телефон", key: "phone", width: 20 },
+      ...Array.from({ length: width }, (_, i) => ({
+        header: `field_${i + 1}`,
+        key: `field_${i + 1}`,
+        width: 24
+      })),
+      { header: "WhatsApp", key: "whatsappStatus", width: 14 }
+    ];
+    for (const { contact, vars } of parsed) {
+      const keys = sortedVarKeys(vars);
+      const row: Record<string, unknown> = {
+        name: xlsxSafe(contact.name ?? ""),
+        phone: xlsxSafe(contact.phone ?? ""),
+        whatsappStatus: contact.whatsappStatus ?? "unknown"
+      };
+      for (let i = 0; i < width; i++) {
+        row[`field_${i + 1}`] = xlsxSafe(keys[i] ? (vars[keys[i]] ?? "") : "");
+      }
+      ws.addRow(row);
+    }
+    ws.getRow(1).font = { bold: true };
+
+    const safeName =
+      sub.name
+        .replace(/[^a-zA-Z0-9-_а-яА-ЯёЁ]/g, "_")
+        .slice(0, 50) || "contacts";
+    // Non-ASCII names (Cyrillic, emoji) are illegal in a raw header value and
+    // make Node throw ERR_INVALID_CHAR → HTTP 500. Send an ASCII filename plus
+    // the RFC 5987 encoded original so the download keeps its real name.
+    const asciiFallback = `contacts-${safeName.replace(/[^a-zA-Z0-9-_]/g, "_")}-${contacts.length}.xlsx`;
+    const encodedName = encodeURIComponent(`contacts-${safeName}-${contacts.length}.xlsx`);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`
+    );
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err: any) {
+    console.error(`[contacts] export.xlsx failed for subgroup ${id}:`, err?.message ?? err);
     res.status(500).json({ error: err.message });
   }
 });

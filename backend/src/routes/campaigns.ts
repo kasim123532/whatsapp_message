@@ -225,15 +225,23 @@ router.get("/:id/export.xlsx", async (req, res) => {
     ws.getRow(1).font = { bold: true };
 
     // Whitelist filename chars and quote it — campaign names are user input.
+    // Non-ASCII (Cyrillic, emoji) is illegal in a raw header value and makes
+    // Node throw ERR_INVALID_CHAR → HTTP 500, so send ASCII + RFC 5987 name.
     const safeName =
       campaign.name
         .replace(/[^a-zA-Z0-9-_а-яА-ЯёЁ]/g, "_")
         .slice(0, 50) || "campaign";
+    const asciiFallback = `campaign-${safeName.replace(/[^a-zA-Z0-9-_]/g, "_")}-${id.slice(0, 8)}.xlsx`;
+    const encodedName = encodeURIComponent(`campaign-${safeName}-${id.slice(0, 8)}.xlsx`);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", `attachment; filename="campaign-${safeName}-${id.slice(0, 8)}.xlsx"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`
+    );
     await wb.xlsx.write(res);
     res.end();
   } catch (err: any) {
+    console.error(`[campaigns] export.xlsx failed for campaign ${id}:`, err?.message ?? err);
     res.status(500).json({ error: err.message });
   }
 });

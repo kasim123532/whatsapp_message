@@ -15,6 +15,40 @@ import proxiesRouter from "./routes/proxies.js";
 
 dotenv.config();
 
+/**
+ * One banned/unlinked account must never kill the other five.
+ * whatsapp-web.js throws async `detached Frame / Target closed` errors from
+ * inside its own inject() loop (Client.js:503) AFTER emitting `disconnected`.
+ * Nothing in our per-client try/catch can catch those — without these global
+ * guards the whole Node process exits and Docker restarts every session.
+ * Allowlisted transient browser errors are logged and swallowed; anything
+ * else still exits so a truly corrupted process doesn't limp on.
+ */
+function isBenignBrowserCrash(err: unknown): boolean {
+  const msg = err instanceof Error ? `${err.name}: ${err.message}\n${err.stack ?? ""}` : String(err);
+  return /detached Frame|Execution context was destroyed|Target closed|Session closed|Protocol error|Navigation failed|net::ERR_|Timed out|Connection closed/i.test(
+    msg
+  );
+}
+
+process.on("uncaughtException", (err) => {
+  if (isBenignBrowserCrash(err)) {
+    console.error("[Server] Swallowed benign browser crash (process kept alive):", err);
+    return;
+  }
+  console.error("[Server] Fatal uncaughtException, exiting:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  if (isBenignBrowserCrash(reason)) {
+    console.error("[Server] Swallowed benign unhandledRejection (process kept alive):", reason);
+    return;
+  }
+  console.error("[Server] Fatal unhandledRejection, exiting:", reason);
+  process.exit(1);
+});
+
 const app = express();
 const port = process.env.PORT || 5000;
 

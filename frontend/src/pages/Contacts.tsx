@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/api";
+import { apiRequest, API_URL } from "@/lib/api";
 import { toast } from "sonner";
 import { Contact, ContactGroup } from "@/types";
 
@@ -558,7 +558,7 @@ const Contacts = () => {
       const cells = [c.phone, ...varKeys.map((k) => c.variables[k] ?? "")];
       return cells.map(escapeCsvValue).join(";");
     });
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -568,6 +568,36 @@ const Contacts = () => {
     a.remove();
     URL.revokeObjectURL(url);
     toast.success(`Экспортировано: ${source.length}`);
+  };
+
+  const handleExportXlsx = async () => {
+    const source = selectedIdList.length > 0
+      ? filteredContacts.filter((c) => selectedIds.has(c.id))
+      : filteredContacts;
+    if (!selectedSubGroup || source.length === 0) {
+      toast.error("Нет контактов для экспорта");
+      return;
+    }
+    try {
+      const resp = await fetch(`${API_URL}/contacts/subgroups/${selectedSubGroup.subGroupId}/export.xlsx`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: source.map((c) => c.id) })
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `contacts-${activeSubGroup?.name ?? "export"}-${source.length}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success(`Экспортировано: ${source.length}`);
+    } catch (e: any) {
+      toast.error(e.message || "Ошибка выгрузки XLSX");
+    }
   };
 
   const moveTargetSubGroups = useMemo(() => {
@@ -874,6 +904,9 @@ const Contacts = () => {
                       </Button>
                       <Button size="sm" variant="outline" className="gap-1.5" onClick={handleExport}>
                         <Download className="h-3.5 w-3.5" /> Экспорт CSV
+                      </Button>
+                      <Button size="sm" variant="outline" className="gap-1.5" onClick={handleExportXlsx}>
+                        <Download className="h-3.5 w-3.5" /> Экспорт XLSX
                       </Button>
                       <Button size="sm" variant="outline" className="gap-1.5" onClick={openMoveDialog} disabled={isChecking}>
                         <ArrowRightLeft className="h-3.5 w-3.5" /> Переместить
