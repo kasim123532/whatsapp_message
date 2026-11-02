@@ -27,6 +27,39 @@ function parseIds(value: unknown): string[] {
   return [];
 }
 
+let warnedMsgIdShape = false;
+
+/**
+ * WhatsApp Web has been renaming `_serialized` to `$1` on ids, so the id of a
+ * sent message can come in several shapes. Try each; as a last resort rebuild
+ * the canonical "fromMe_remote_id" form from its parts.
+ */
+function extractMsgId(msg: any): string | null {
+  try {
+    const id = msg?.id ?? msg?._data?.id;
+    if (typeof id === "string" && id) return id;
+    if (!id || typeof id !== "object") return null;
+    for (const key of ["_serialized", "$1"]) {
+      if (typeof id[key] === "string" && id[key]) return id[key];
+    }
+    const remote = id.remote;
+    const remoteStr =
+      typeof remote === "string"
+        ? remote
+        : remote?._serialized ?? remote?.$1 ?? (remote?.user && remote?.server ? `${remote.user}@${remote.server}` : null);
+    if (remoteStr && typeof id.id === "string" && typeof id.fromMe === "boolean") {
+      return `${id.fromMe}_${remoteStr}_${id.id}`;
+    }
+    if (!warnedMsgIdShape) {
+      warnedMsgIdShape = true;
+      console.warn(`[Scheduler] Unrecognised sent-message id shape, keys: ${Object.keys(id).join(",")}`);
+    }
+  } catch {
+    // never let id bookkeeping fail a send that already went out
+  }
+  return null;
+}
+
 interface SenderAccount {
   id: string;
   phone: string | null;
@@ -313,13 +346,7 @@ class CampaignScheduler {
         ? await client.sendMessage(whatsappId, this.getMedia(campaign), finalMessage ? { caption: finalMessage } : {})
         : await client.sendMessage(whatsappId, finalMessage);
       sentSuccess = true;
-      try {
-        const rawId = (msg as any)?.id;
-        sentMsgId =
-          typeof rawId === "string" ? rawId : typeof rawId?._serialized === "string" ? rawId._serialized : null;
-      } catch {
-        sentMsgId = null;
-      }
+      sentMsgId = extractMsgId(msg);
     } catch (err: any) {
       console.error(`[Scheduler] Send failed to ${recipient.contact.phone}:`, err.message);
       errorMsg = err.message || "Unknown error";
