@@ -50,6 +50,8 @@ export interface Campaign {
   phone: string[];
   accountIds?: string[];
   message: string;
+  hasImage?: boolean;
+  imageUrl?: string | null;
   group: string;
   groupId: string;
   nextAction: string | null;

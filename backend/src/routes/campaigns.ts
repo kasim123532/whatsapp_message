@@ -1,9 +1,22 @@
 import { Router } from "express";
+import multer from "multer";
 import ExcelJS from "exceljs";
 import { prisma } from "../db.js";
 import { notifyCampaign } from "../lib/campaignEvents.js";
+import {
+  MAX_CAPTION_LENGTH,
+  MAX_IMAGE_BYTES,
+  MEDIA_DIR,
+  ensureMediaDir,
+  mediaExists,
+  mediaPath,
+  removeMedia,
+  sniffImage
+} from "../lib/campaignMedia.js";
+import fs from "fs";
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_IMAGE_BYTES, files: 1 } });
 
 const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -116,6 +129,8 @@ function toDto(c: any, counts?: { sent: number; pending: number; failed: number 
     phone: parseJsonArray(c.phones),
     accountIds: parseJsonArray(c.accountIds ?? "[]"),
     message: c.message,
+    hasImage: !!c.imageFile,
+    imageUrl: c.imageFile ? `/campaigns/${c.id}/image?v=${encodeURIComponent(c.imageFile)}` : null,
     group: c.groupName,
     groupId: c.groupId,
     nextAction: c.nextAction,
@@ -250,7 +265,9 @@ router.get("/:id/export.xlsx", async (req, res) => {
 router.post("/", async (req, res) => {
   const { name, phones, accountIds, message, groupId, minInterval, maxInterval, sendFrom, sendTo } = req.body;
 
-  if (!name || !message || !groupId || (!phones && !accountIds)) {
+  // message may be empty: a photo-only campaign gets its photo in a second request,
+  // and /start refuses a campaign that has neither text nor photo.
+  if (!name || typeof message !== "string" || !groupId || (!phones && !accountIds)) {
     return res.status(400).json({ error: "Missing required fields (name, phones|accountIds, message, groupId)" });
   }
   if (String(name).length > MAX_NAME_LENGTH) {
@@ -314,7 +331,7 @@ router.put("/:id", async (req, res) => {
   const { id } = req.params;
   const { name, phones, accountIds, message, minInterval, maxInterval, sendFrom, sendTo } = req.body;
 
-  if (!name || !message || (!phones && !accountIds)) {
+  if (!name || typeof message !== "string" || (!phones && !accountIds)) {
     return res.status(400).json({ error: "Missing required fields (name, phones|accountIds, message)" });
   }
   if (String(name).length > MAX_NAME_LENGTH) {
@@ -338,6 +355,9 @@ router.put("/:id", async (req, res) => {
   try {
     const existing = await prisma.campaign.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: "Campaign not found" });
+    if (existing.imageFile && String(message).length > MAX_CAPTION_LENGTH) {
+      return res.status(400).json({ error: `Caption must be at most ${MAX_CAPTION_LENGTH} characters when a photo is attached` });
+    }
 
     const senders = await resolveSenders({ accountIds, phones });
     if ("error" in senders) return res.status(400).json({ error: senders.error });
@@ -370,6 +390,18 @@ router.post("/:id/start", async (req, res) => {
   try {
     const campaign = await prisma.campaign.findUnique({ where: { id } });
     if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+
+    if (!campaign.message.trim() && !campaign.imageFile) {
+      return res.status(400).json({ error: "Campaign has neither text nor photo" });
+    }
+    if (campaign.imageFile) {
+      if (campaign.message.length > MAX_CAPTION_LENGTH) {
+        return res.status(400).json({ error: `Caption must be at most ${MAX_CAPTION_LENGTH} characters when a photo is attached` });
+      }
+      if (!mediaExists(campaign.imageFile)) {
+        return res.status(400).json({ error: "Photo file is missing on the server — upload it again" });
+      }
+    }
 
     const counts = await liveCounts([id]);
     const live = counts.get(id)!;
@@ -410,9 +442,76 @@ router.post("/:id/pause", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
   try {
+    const existing = await prisma.campaign.findUnique({ where: { id }, select: { imageFile: true } });
     await prisma.campaign.delete({ where: { id } });
+    removeMedia(existing?.imageFile);
     notifyCampaign(id, "DELETED");
     res.json({ message: "Campaign deleted successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET the campaign photo (thumbnail in the UI)
+router.get("/:id/image", async (req, res) => {
+  try {
+    const c = await prisma.campaign.findUnique({ where: { id: req.params.id }, select: { imageFile: true, imageMime: true } });
+    const full = c?.imageFile ? mediaPath(c.imageFile) : null;
+    if (!c || !full || !fs.existsSync(full)) return res.status(404).json({ error: "No photo" });
+    res.setHeader("Content-Type", c.imageMime || "application/octet-stream");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    fs.createReadStream(full).pipe(res);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST upload / replace the photo (multipart field "image")
+router.post("/:id/image", (req, res) => {
+  upload.single("image")(req, res, async (uploadErr: any) => {
+    if (uploadErr) {
+      const tooBig = uploadErr.code === "LIMIT_FILE_SIZE";
+      return res.status(tooBig ? 413 : 400).json({ error: tooBig ? `Photo must be at most ${MAX_IMAGE_BYTES / 1024 / 1024} MB` : uploadErr.message });
+    }
+    const { id } = req.params;
+    try {
+      const campaign = await prisma.campaign.findUnique({ where: { id } });
+      if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+      if (campaign.status === "RUNNING") return res.status(409).json({ error: "Pause the campaign before changing its photo" });
+      if (!req.file) return res.status(400).json({ error: "Attach a file in the 'image' field" });
+      if (campaign.message.length > MAX_CAPTION_LENGTH) {
+        return res.status(400).json({ error: `Shorten the text to ${MAX_CAPTION_LENGTH} characters first — it becomes the photo caption` });
+      }
+
+      const kind = sniffImage(req.file.buffer);
+      if (!kind) return res.status(400).json({ error: "Only JPEG, PNG or WebP images are supported" });
+
+      ensureMediaDir();
+      const fileName = `${id}-${Date.now()}.${kind.ext}`;
+      fs.writeFileSync(`${MEDIA_DIR}/${fileName}`, req.file.buffer);
+      const updated = await prisma.campaign.update({ where: { id }, data: { imageFile: fileName, imageMime: kind.mime } });
+      removeMedia(campaign.imageFile);
+      notifyCampaign(id, updated.status);
+      res.json(toDto(updated));
+    } catch (err: any) {
+      console.error(`[campaigns] image upload failed for ${id}:`, err?.message ?? err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+});
+
+// DELETE the photo (campaign falls back to text-only)
+router.delete("/:id/image", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const campaign = await prisma.campaign.findUnique({ where: { id } });
+    if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+    if (campaign.status === "RUNNING") return res.status(409).json({ error: "Pause the campaign before changing its photo" });
+    const updated = await prisma.campaign.update({ where: { id }, data: { imageFile: null, imageMime: null } });
+    removeMedia(campaign.imageFile);
+    notifyCampaign(id, updated.status);
+    res.json(toDto(updated));
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

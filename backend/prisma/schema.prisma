@@ -81,7 +81,11 @@ model Campaign {
   name           String
   phones         String              @default("[]") // JSON array of sender phone numbers (legacy, для отображения)
   accountIds     String              @default("[]") // JSON array of sender Account.id — основной идентификатор
-  message        String
+  message        String              // text, or the photo caption when imageFile is set (may be empty with a photo)
+  // Optional single photo, stored on disk (see lib/campaignMedia.ts). Only the
+  // server-generated file name lives here, never a user-supplied path.
+  imageFile      String?
+  imageMime      String?
   groupName      String              // The name of the subgroup target
   groupId        String              // The ID of the subgroup target
   nextAction     DateTime?

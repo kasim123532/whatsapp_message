@@ -21,3 +21,13 @@ export async function apiRequest(path: string, options?: RequestInit) {
 
   return response.json();
 }
+
+/** multipart upload: no Content-Type header, the browser must set the boundary itself. */
+export async function apiUpload(path: string, formData: FormData) {
+  const response = await fetch(`${API_URL}${path}`, { method: "POST", body: formData });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+  }
+  return response.json();
+}

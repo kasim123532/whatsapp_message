@@ -37,6 +37,11 @@ COPY package*.json ./
 # Install only production dependencies
 RUN npm install --omit=dev
 
+# Backport of an upstream whatsapp-web.js fix that photo/media sending needs
+# (fails the build if the library code it patches ever moves).
+COPY scripts ./scripts/
+RUN node scripts/patch-wwebjs.cjs
+
 # Copy built code and prisma artifacts from build stage
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma

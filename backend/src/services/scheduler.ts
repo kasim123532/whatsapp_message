@@ -2,6 +2,8 @@ import { prisma } from "../db.js";
 import { wsManager } from "../whatsapp.js";
 import { localDayKey, localTimeHHMM } from "../lib/time.js";
 import { notifyCampaign } from "../lib/campaignEvents.js";
+import { mediaExists, mediaPath } from "../lib/campaignMedia.js";
+import { MessageMedia } from "whatsapp-web.js";
 
 /** How many times a recipient is tried before it is written off as FAILED. */
 const MAX_ATTEMPTS = Number(process.env.MAX_SEND_ATTEMPTS) || 3;
@@ -33,6 +35,22 @@ interface SenderAccount {
 }
 
 class CampaignScheduler {
+  /** Decoded photos keyed by stored file name (a replaced photo gets a new name). */
+  private mediaCache = new Map<string, any>();
+
+  private getMedia(campaign: any) {
+    const file: string = campaign.imageFile;
+    let media = this.mediaCache.get(file);
+    if (!media) {
+      const full = mediaPath(file);
+      if (!full) throw new Error("Invalid photo path");
+      media = MessageMedia.fromFilePath(full);
+      if (this.mediaCache.size >= 20) this.mediaCache.clear();
+      this.mediaCache.set(file, media);
+    }
+    return media;
+  }
+
   private timer: NodeJS.Timeout | null = null;
   private isProcessing = false;
 
@@ -188,6 +206,14 @@ class CampaignScheduler {
       return;
     }
 
+    // Фото пропало с диска — ставим на паузу целиком, а не валим каждого получателя.
+    if (campaign.imageFile && !mediaExists(campaign.imageFile)) {
+      console.error(`[Scheduler] Campaign "${campaign.name}": photo file is missing, pausing.`);
+      await prisma.campaign.update({ where: { id: campaign.id }, data: { isPaused: true, status: "PAUSED" } });
+      notifyCampaign(campaign.id, "PAUSED");
+      return;
+    }
+
     // Сендеры: основной ключ — Account.id, phones — legacy fallback.
     let accountIds = parseIds((campaign as any).accountIds);
     let senderPhones = parseIds(campaign.phones);
@@ -274,6 +300,8 @@ class CampaignScheduler {
       `[Scheduler] Sending message for Campaign "${campaign.name}" to ${recipient.contact.phone} via ${sender.phone}`
     );
 
+    const sentLog = campaign.imageFile ? `[фото]${finalMessage ? " " + finalMessage : ""}` : finalMessage;
+
     let sentSuccess = false;
     let errorMsg = "";
     let sentMsgId: string | null = null;
@@ -281,7 +309,9 @@ class CampaignScheduler {
     try {
       const formattedPhone = recipient.contact.phone.replace(/\D/g, "");
       const whatsappId = `${formattedPhone}@c.us`;
-      const msg = await client.sendMessage(whatsappId, finalMessage);
+      const msg = campaign.imageFile
+        ? await client.sendMessage(whatsappId, this.getMedia(campaign), finalMessage ? { caption: finalMessage } : {})
+        : await client.sendMessage(whatsappId, finalMessage);
       sentSuccess = true;
       try {
         const rawId = (msg as any)?.id;
@@ -321,7 +351,7 @@ class CampaignScheduler {
           error: null,
           senderAccountId: sender.id,
           senderPhone: sender.phone,
-          sentText: finalMessage,
+          sentText: sentLog,
           ...(sentMsgId ? { sentMsgId } : {})
         }
       });
@@ -339,7 +369,7 @@ class CampaignScheduler {
       const nextAttemptAt = new Date(now.getTime() + backoffMs);
       await prisma.campaignRecipient.update({
         where: { id: recipient.id },
-        data: { status: "PENDING", attempts, nextAttemptAt, error: errorMsg, sentText: finalMessage }
+        data: { status: "PENDING", attempts, nextAttemptAt, error: errorMsg, sentText: sentLog }
       });
       console.log(
         `[Scheduler] Attempt ${attempts}/${MAX_ATTEMPTS} failed for ${recipient.contact.phone}, retrying at ${nextAttemptAt.toISOString()}.`
@@ -357,7 +387,7 @@ class CampaignScheduler {
         error: errorMsg,
         senderPhone: sender.phone,
         senderAccountId: sender.id,
-        sentText: finalMessage
+        sentText: sentLog
       }
     });
     await prisma.campaign.update({

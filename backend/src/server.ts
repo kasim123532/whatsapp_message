@@ -12,6 +12,7 @@ import contactsRouter from "./routes/contacts.js";
 import templatesRouter from "./routes/templates.js";
 import campaignsRouter from "./routes/campaigns.js";
 import proxiesRouter from "./routes/proxies.js";
+import { ensureMediaDir } from "./lib/campaignMedia.js";
 
 dotenv.config();
 
@@ -48,6 +49,8 @@ process.on("unhandledRejection", (reason) => {
   console.error("[Server] Fatal unhandledRejection, exiting:", reason);
   process.exit(1);
 });
+
+ensureMediaDir();
 
 const app = express();
 const port = process.env.PORT || 5000;

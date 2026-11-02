@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -10,11 +10,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { Plus, Pause, Play, Trash2, MoreVertical, Download, Copy, Pencil, Archive, Loader2 } from "lucide-react";
+import { Plus, Pause, Play, Trash2, MoreVertical, Download, Copy, Pencil, Archive, Loader2, ImagePlus, X } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest, API_URL } from "@/lib/api";
+import { apiRequest, apiUpload, API_URL } from "@/lib/api";
 import { toast } from "sonner";
 import { Campaign } from "@/types";
 
@@ -51,6 +51,63 @@ const SubgroupVariableInfo = ({
   );
 };
 
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const MAX_CAPTION = 1024;
+
+/** One optional photo: shows the saved one (existingUrl) or a preview of the picked file. */
+const PhotoPicker = ({
+  file,
+  existingUrl,
+  onFile,
+  onRemoveExisting
+}: {
+  file: File | null;
+  existingUrl?: string | null;
+  onFile: (f: File | null) => void;
+  onRemoveExisting?: () => void;
+}) => {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const preview = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+  const shown = preview ?? (existingUrl ? `${API_URL}${existingUrl}` : null);
+
+  const pick = (f: File | undefined) => {
+    if (!f) return;
+    if (!["image/jpeg", "image/png", "image/webp"].includes(f.type)) {
+      toast.error("Поддерживаются только JPEG, PNG и WebP");
+      return;
+    }
+    if (f.size > MAX_PHOTO_BYTES) {
+      toast.error("Фото должно быть не больше 5 МБ");
+      return;
+    }
+    onFile(f);
+  };
+
+  return (
+    <div>
+      <Label>Фото (необязательно)</Label>
+      <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden"
+        onChange={(e) => { pick(e.target.files?.[0]); e.target.value = ""; }} />
+      {shown ? (
+        <div className="relative mt-1 inline-block">
+          <img src={shown} alt="Фото рассылки" className="max-h-40 rounded-lg border border-border" />
+          <button type="button" title="Убрать фото"
+            onClick={() => (file ? onFile(null) : onRemoveExisting?.())}
+            className="absolute -top-2 -right-2 rounded-full bg-destructive text-destructive-foreground p-1">
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      ) : (
+        <Button type="button" variant="outline" className="mt-1 gap-2" onClick={() => inputRef.current?.click()}>
+          <ImagePlus className="h-4 w-4" /> Прикрепить фото
+        </Button>
+      )}
+      <p className="text-xs text-muted-foreground mt-1">JPEG/PNG/WebP до 5 МБ. Текст ниже станет подписью к фото (можно оставить пустым).</p>
+    </div>
+  );
+};
+
 const Campaigns = () => {
   const queryClient = useQueryClient();
   
@@ -63,6 +120,9 @@ const Campaigns = () => {
     name: "", phones: [] as string[], message: "", groupId: "",
     minInterval: "60", maxInterval: "120", sendFrom: "08:00", sendTo: "20:00",
   });
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [editPhoto, setEditPhoto] = useState<File | null>(null);
+  const [removePhoto, setRemovePhoto] = useState(false);
   const [editForm, setEditForm] = useState({
     name: "", phones: [] as string[], message: "",
     minInterval: "60", maxInterval: "120", sendFrom: "08:00", sendTo: "20:00",
@@ -113,12 +173,28 @@ const Campaigns = () => {
 
   // Mutations
   const createMutation = useMutation({
-    mutationFn: (data: any) =>
-      apiRequest("/campaigns", {
+    mutationFn: async ({ data, photo }: { data: any; photo: File | null }) => {
+      const camp = await apiRequest("/campaigns", {
         method: "POST",
         body: JSON.stringify(data)
-      }),
+      });
+      let uploadError: string | null = null;
+      if (photo) {
+        const fd = new FormData();
+        fd.append("image", photo);
+        try {
+          await apiUpload(`/campaigns/${camp.id}/image`, fd);
+        } catch (e: any) {
+          uploadError = e.message || "Не удалось загрузить фото";
+        }
+      }
+      return { ...camp, uploadError };
+    },
     onSuccess: (newCamp) => {
+      setPhoto(null);
+      if (newCamp.uploadError) {
+        toast.error(`Рассылка создана, но фото не загружено: ${newCamp.uploadError}. Добавьте его через «Изменить».`);
+      }
       queryClient.invalidateQueries({ queryKey: ["campaigns"] });
       setSelectedId(newCamp.id);
       setDialogOpen(false);
@@ -126,7 +202,7 @@ const Campaigns = () => {
         name: "", phones: [], message: "", groupId: "",
         minInterval: "60", maxInterval: "120", sendFrom: "08:00", sendTo: "20:00"
       });
-      toast.success("Рассылка создана");
+      if (!newCamp.uploadError) toast.success("Рассылка создана");
     },
     onError: (err: any) => {
       toast.error(err.message || "Ошибка создания рассылки");
@@ -134,12 +210,23 @@ const Campaigns = () => {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: any }) =>
-      apiRequest(`/campaigns/${id}`, {
+    mutationFn: async ({ id, data }: { id: string; data: any }) => {
+      const res = await apiRequest(`/campaigns/${id}`, {
         method: "PUT",
         body: JSON.stringify(data)
-      }),
+      });
+      if (editPhoto) {
+        const fd = new FormData();
+        fd.append("image", editPhoto);
+        await apiUpload(`/campaigns/${id}/image`, fd);
+      } else if (removePhoto) {
+        await apiRequest(`/campaigns/${id}/image`, { method: "DELETE" });
+      }
+      return res;
+    },
     onSuccess: () => {
+      setEditPhoto(null);
+      setRemovePhoto(false);
       queryClient.invalidateQueries({ queryKey: ["campaigns"] });
       setEditDialogOpen(false);
       setEditingId(null);
@@ -172,8 +259,12 @@ const Campaigns = () => {
 
   // Handlers
   const handleCreate = () => {
-    if (!form.name || form.phones.length === 0 || !form.message || !form.groupId) {
-      toast.error("Заполните все обязательные поля");
+    if (!form.name || form.phones.length === 0 || (!form.message && !photo) || !form.groupId) {
+      toast.error("Заполните все обязательные поля (нужен текст или фото)");
+      return;
+    }
+    if (photo && form.message.length > MAX_CAPTION) {
+      toast.error(`Подпись к фото — не больше ${MAX_CAPTION} символов`);
       return;
     }
 
@@ -185,15 +276,18 @@ const Campaigns = () => {
     }
 
     createMutation.mutate({
-      name: form.name,
-      phones: form.phones,
-      accountIds: phonesToIds(form.phones),
-      message: form.message,
-      groupId: form.groupId,
-      minInterval: parseInt(form.minInterval),
-      maxInterval: parseInt(form.maxInterval),
-      sendFrom: form.sendFrom,
-      sendTo: form.sendTo
+      photo,
+      data: {
+        name: form.name,
+        phones: form.phones,
+        accountIds: phonesToIds(form.phones),
+        message: form.message,
+        groupId: form.groupId,
+        minInterval: parseInt(form.minInterval),
+        maxInterval: parseInt(form.maxInterval),
+        sendFrom: form.sendFrom,
+        sendTo: form.sendTo
+      }
     });
   };
 
@@ -208,6 +302,8 @@ const Campaigns = () => {
 
   const openEditDialog = (c: Campaign) => {
     setEditingId(c.id);
+    setEditPhoto(null);
+    setRemovePhoto(false);
     setEditForm({
       name: c.name,
       phones: campaignIdsToPhones(c),
@@ -223,8 +319,14 @@ const Campaigns = () => {
   const handleEdit = () => {
     if (!editingId) return;
 
-    if (!editForm.name || editForm.phones.length === 0 || !editForm.message) {
-      toast.error("Заполните все обязательные поля");
+    const editingCamp = campaigns.find((c) => c.id === editingId);
+    const willHavePhoto = !!editPhoto || (!!editingCamp?.hasImage && !removePhoto);
+    if (!editForm.name || editForm.phones.length === 0 || (!editForm.message && !willHavePhoto)) {
+      toast.error("Заполните все обязательные поля (нужен текст или фото)");
+      return;
+    }
+    if (willHavePhoto && editForm.message.length > MAX_CAPTION) {
+      toast.error(`Подпись к фото — не больше ${MAX_CAPTION} символов`);
       return;
     }
 
@@ -346,8 +448,9 @@ const Campaigns = () => {
                     <p className="text-xs text-muted-foreground mt-1">Выбрано отправителей: {form.phones.length}</p>
                   )}
                 </div>
+                <PhotoPicker file={photo} onFile={setPhoto} />
                 <div>
-                  <Label>Текст рассылки</Label>
+                  <Label>{photo ? "Подпись к фото" : "Текст рассылки"}</Label>
                   <Textarea
                     placeholder="Используйте {{field_1}}, {{field_2}} для переменных..."
                     value={form.message}
@@ -529,9 +632,14 @@ const Campaigns = () => {
 
                   {/* Message body */}
                   <CardContent className="p-5">
-                    <div className="bg-muted/50 rounded-xl p-4 text-sm leading-relaxed whitespace-pre-wrap border border-border">
-                      {selected.message}
-                    </div>
+                    {selected.imageUrl && (
+                      <img src={`${API_URL}${selected.imageUrl}`} alt="Фото рассылки" className="mb-3 max-h-64 rounded-xl border border-border" />
+                    )}
+                    {(selected.message || !selected.imageUrl) && (
+                      <div className="bg-muted/50 rounded-xl p-4 text-sm leading-relaxed whitespace-pre-wrap border border-border">
+                        {selected.message}
+                      </div>
+                    )}
                   </CardContent>
 
                   {/* Footer bar */}
@@ -665,8 +773,14 @@ const Campaigns = () => {
                 <p className="text-xs text-muted-foreground mt-1">Выбрано отправителей: {editForm.phones.length}</p>
               )}
             </div>
+            <PhotoPicker
+              file={editPhoto}
+              existingUrl={removePhoto ? null : campaigns.find((c) => c.id === editingId)?.imageUrl}
+              onFile={setEditPhoto}
+              onRemoveExisting={() => setRemovePhoto(true)}
+            />
             <div>
-              <Label>Текст рассылки</Label>
+              <Label>Подпись / текст рассылки</Label>
               <Textarea
                 value={editForm.message}
                 onChange={(e) => setEditForm({ ...editForm, message: e.target.value })}
