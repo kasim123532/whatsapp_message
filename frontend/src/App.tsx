@@ -13,31 +13,34 @@ import QrGenerator from "./pages/QrGenerator";
 import ProxyManagement from "./pages/ProxyManagement";
 import ConnectAccount from "./pages/ConnectAccount";
 import NotFound from "./pages/NotFound";
+import { ThemeProvider } from "next-themes";
 
 const queryClient = new QueryClient();
 
 const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <WebSocketProvider>
-      <TooltipProvider>
-        <Toaster />
-        <Sonner />
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            <Route path="/accounts" element={<Accounts />} />
-            <Route path="/contacts" element={<Contacts />} />
-            <Route path="/templates" element={<Templates />} />
-            <Route path="/campaigns" element={<Campaigns />} />
-            <Route path="/qr" element={<QrGenerator />} />
-            <Route path="/proxies" element={<ProxyManagement />} />
-            <Route path="/connect/:id" element={<ConnectAccount />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </BrowserRouter>
-      </TooltipProvider>
-    </WebSocketProvider>
-  </QueryClientProvider>
+  <ThemeProvider attribute="class" defaultTheme="system" enableSystem storageKey="theme" disableTransitionOnChange>
+    <QueryClientProvider client={queryClient}>
+      <WebSocketProvider>
+        <TooltipProvider>
+          <Toaster />
+          <Sonner />
+          <BrowserRouter>
+            <Routes>
+              <Route path="/" element={<Index />} />
+              <Route path="/accounts" element={<Accounts />} />
+              <Route path="/contacts" element={<Contacts />} />
+              <Route path="/templates" element={<Templates />} />
+              <Route path="/campaigns" element={<Campaigns />} />
+              <Route path="/qr" element={<QrGenerator />} />
+              <Route path="/proxies" element={<ProxyManagement />} />
+              <Route path="/connect/:id" element={<ConnectAccount />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </BrowserRouter>
+        </TooltipProvider>
+      </WebSocketProvider>
+    </QueryClientProvider>
+  </ThemeProvider>
 );
 
 export default App;

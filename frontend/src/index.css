@@ -82,11 +82,34 @@
     --muted-foreground: 150 8% 55%;
     --accent: 160 15% 14%;
     --accent-foreground: 142 64% 50%;
-    --destructive: 0 62.8% 30.6%;
+    --destructive: 0 65% 48%;
     --destructive-foreground: 0 0% 100%;
     --border: 160 12% 16%;
-    --input: 160 12% 16%;
+    --input: 160 12% 18%;
     --ring: 142 64% 45%;
+
+    /* Sidebar is already dark in light mode; nudge it just below the page. */
+    --sidebar-background: 160 22% 5%;
+    --sidebar-accent: 160 15% 12%;
+    --sidebar-border: 160 12% 13%;
+
+    --wa-green: 142 60% 48%;
+    --wa-green-light: 142 40% 16%;
+    --wa-green-dark: 142 60% 62%;
+    --wa-teal: 168 50% 50%;
+    --wa-emerald: 152 55% 48%;
+    --wa-amber: 38 92% 56%;
+    --wa-amber-light: 38 60% 16%;
+
+    --gradient-hero: linear-gradient(135deg, hsl(160, 22%, 5%), hsl(160, 25%, 11%));
+    --gradient-card: linear-gradient(145deg, hsl(160, 18%, 11%), hsl(160, 18%, 9%));
+
+    --shadow-sm: 0 1px 3px hsl(0 0% 0% / 0.3);
+    --shadow-md: 0 4px 16px hsl(0 0% 0% / 0.35);
+    --shadow-lg: 0 12px 40px hsl(0 0% 0% / 0.45);
+    --shadow-glow: 0 0 30px hsl(142 64% 45% / 0.2);
+
+    color-scheme: dark;
   }
 }
 
