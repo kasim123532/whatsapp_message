@@ -297,7 +297,12 @@ router.post("/", async (req, res) => {
         }
       });
       await tx.campaignRecipient.createMany({
-        data: subGroup.contacts.map((c) => ({ campaignId: campaign.id, contactId: c.id, status: "PENDING" }))
+        data: subGroup.contacts.map((c, i) => ({
+          campaignId: campaign.id,
+          contactId: c.id,
+          status: "PENDING",
+          position: i
+        }))
       });
       return campaign;
     });

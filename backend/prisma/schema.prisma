@@ -111,6 +111,9 @@ model CampaignRecipient {
   // SENDING = атомарный клейм: строка захвачена одним воркером, второй её не возьмёт.
   attempts      Int       @default(0)
   nextAttemptAt DateTime?
+  // Порядок отправки = порядок контактов в подгруппе (0,1,2,...). Без него SQLite
+  // отдаёт строки в произвольном порядке (одинаковый updatedAt у всех).
+  position      Int       @default(0)
   // Кто и когда реально отправил + итоговый текст (после подстановки {{переменных}}).
   senderAccountId String?
   senderPhone     String?

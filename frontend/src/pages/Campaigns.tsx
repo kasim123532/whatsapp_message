@@ -22,7 +22,7 @@ const SubgroupVariableInfo = ({
   variables,
   onInsert
 }: {
-  variables: string[];
+  variables: { name: string; example: string }[];
   onInsert?: (variable: string) => void;
 }) => {
   if (variables.length === 0) return null;
@@ -34,16 +34,21 @@ const SubgroupVariableInfo = ({
       </div>
       <div className="space-y-1">
         {variables.map((v) => (
-          <div key={v} className="flex items-center justify-between text-sm">
+          <div key={v.name} className="flex items-center justify-between text-sm">
             <button
               type="button"
-              onClick={() => onInsert?.(`{{${v}}}`)}
-              className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono hover:bg-primary/20 hover:text-primary transition-colors cursor-pointer"
+              onClick={() => onInsert?.(`{{${v.name}}}`)}
+              className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono hover:bg-primary/20 hover:text-primary transition-colors cursor-pointer shrink-0"
               title="Нажмите чтобы вставить в текст"
             >
-              {`{{${v}}}`}
+              {`{{${v.name}}}`}
             </button>
-            <span className="text-xs text-muted-foreground truncate ml-2">Пример значения</span>
+            <span
+              className="text-xs text-muted-foreground truncate ml-2"
+              title={v.example || undefined}
+            >
+              {v.example || "—"}
+            </span>
           </div>
         ))}
       </div>
@@ -105,10 +110,18 @@ const Campaigns = () => {
   // Selected subgroup variables helper
   const getSubgroupVars = (subGroupId: string) => {
     const sg = subgroups.find(s => s.id === subGroupId);
-    if (sg && sg.contacts.length > 0) {
-      return Object.keys(sg.contacts[0].variables || {});
-    }
-    return [];
+    if (!sg || sg.contacts.length === 0) return [];
+    // Имена переменных — по первому контакту, пример значения — первое непустое
+    // значение среди первых контактов (у первого поле может быть пустым).
+    const names = Object.keys(sg.contacts[0].variables || {});
+    const sample = sg.contacts.slice(0, 50);
+    return names.map((name) => {
+      const hit = sample.find((c) => {
+        const val = (c.variables || {})[name];
+        return val !== undefined && val !== null && String(val).trim() !== "";
+      });
+      return { name, example: hit ? String((hit.variables || {})[name]) : "" };
+    });
   };
 
   // Mutations

@@ -40,8 +40,15 @@ const SWEEP_INTERVAL_MS = 30 * 1000;
 const PINNED_WEB_VERSION = "2.3000.1046948731";
 
 /** Init retries for transient Puppeteer crashes (see isTransientInitError). */
-const INIT_MAX_RETRIES = 2;
-const INIT_RETRY_BACKOFF_MS = [2000, 5000];
+const INIT_MAX_RETRIES = 3;
+const INIT_RETRY_BACKOFF_MS = [2000, 4000, 6000];
+
+/**
+ * After the phone scans the QR, WhatsApp Web reloads the page and finishes the
+ * pairing. If `ready` hasn't fired this long after `authenticated`, give up and
+ * surface an error instead of hanging in CONNECTING forever.
+ */
+const READY_AFTER_AUTH_MS = Number(process.env.READY_AFTER_AUTH_MS) || 2 * 60 * 1000;
 
 /**
  * A `disconnected: LOGOUT/ban` is usually permanent (needs a fresh QR), but a
@@ -216,7 +223,12 @@ class WhatsAppManager {
     );
   }
 
-  private async initWithRetry(client: Client, id: string, gen: number): Promise<void> {
+  private async initWithRetry(
+    client: Client,
+    id: string,
+    gen: number,
+    isAuthenticated: () => boolean = () => false
+  ): Promise<void> {
     let lastErr: unknown = null;
     for (let attempt = 0; attempt <= INIT_MAX_RETRIES; attempt++) {
       if (gen !== this.currentGen(id)) {
@@ -230,15 +242,27 @@ class WhatsAppManager {
         if (gen !== this.currentGen(id)) {
           throw err;
         }
-        const transient = this.isTransientInitError(err);
-        if (attempt >= INIT_MAX_RETRIES || !transient) {
+        // Если телефон уже отсканировал QR (authenticated), сессия сохранена на диск —
+        // повторный запуск залогинится сам, без нового QR. Поэтому после скана
+        // повторяем при ЛЮБОЙ ошибке, а не только при «транзитных»: именно здесь
+        // раньше привязка срывалась и срабатывала только с 2–4 попытки.
+        const retriable = this.isTransientInitError(err) || isAuthenticated();
+        if (attempt >= INIT_MAX_RETRIES || !retriable) {
           throw err;
         }
         const delay = INIT_RETRY_BACKOFF_MS[attempt] ?? 5000;
         const reason = err instanceof Error ? err.message : String(err);
         console.warn(
-          `[WhatsApp] Transient init failure for ${id} (attempt ${attempt + 1}/${INIT_MAX_RETRIES + 1}), retrying in ${delay}ms: ${reason}`
+          `[WhatsApp] Init failure for ${id} (attempt ${attempt + 1}/${INIT_MAX_RETRIES + 1}, authenticated=${isAuthenticated()}), retrying in ${delay}ms: ${reason}`
         );
+        // Прежний браузер ещё жив и держит профиль (SingletonLock) — без закрытия
+        // повторный initialize() упирался в «profile in use» и валился окончательно.
+        try {
+          await client.destroy();
+        } catch (destroyErr) {
+          console.warn(`[WhatsApp] destroy before init retry failed for ${id}:`, destroyErr);
+        }
+        this.clearStaleProfileLocks(id);
         await sleep(delay);
       }
     }
@@ -366,16 +390,37 @@ class WhatsAppManager {
       }
     });
 
+    // true между «отсканировали» (authenticated) и «готов» (ready): идёт спаривание.
+    let authenticated = false;
+    let isReady = false;
+
     client.on("authenticated", () => {
       if (gen !== this.currentGen(id)) return;
       // Scanned — the browser is no longer idling on a QR screen.
       console.log(`[WhatsApp] Authenticated ${id}`);
+      authenticated = true;
       this.clearDeadline(id);
       this.qrs.delete(id);
+      // Страховка: QR-таймер снят, поэтому ставим свой — если ready не придёт, не висим вечно.
+      const timer = setTimeout(() => {
+        this.deadlines.delete(id);
+        if (gen !== this.currentGen(id) || isReady) return;
+        console.warn(`[WhatsApp] ${id} authenticated but never became ready`);
+        this.fail(id, "Не удалось завершить привязку после сканирования — попробуйте ещё раз", "DISCONNECTED", gen).catch(
+          (err) => console.error(`[WhatsApp] ready-timeout cleanup failed for ${id}:`, err)
+        );
+      }, READY_AFTER_AUTH_MS);
+      this.deadlines.set(id, timer);
+    });
+
+    client.on("loading_screen", (percent, message) => {
+      if (gen !== this.currentGen(id)) return;
+      console.log(`[WhatsApp] ${id} loading ${percent}% ${message}`);
     });
 
     client.on("ready", async () => {
       if (gen !== this.currentGen(id)) return;
+      isReady = true;
       console.log(`[WhatsApp] Client is ready for ${id}`);
       this.clearDeadline(id);
       this.qrs.delete(id);
@@ -425,6 +470,13 @@ class WhatsAppManager {
     client.on("disconnected", async (reason) => {
       if (gen !== this.currentGen(id)) return;
       console.log(`[WhatsApp] Client disconnected for ${id}:`, reason);
+      // Во время спаривания страница WhatsApp Web перезагружается и может прислать
+      // не-фатальный disconnected (например NAVIGATION). Сносить клиента тут нельзя —
+      // сессия уже сохранена, а initWithRetry / ready-таймер сами доведут дело до конца.
+      if (authenticated && !isReady && !isPermanentDisconnectReason(reason)) {
+        console.warn(`[WhatsApp] Ignoring non-fatal disconnect during pairing for ${id}: ${reason}`);
+        return;
+      }
       // WhatsApp reports an unlinked or blocked device by tearing the session down.
       // LOGOUT included: it means the companion device was removed/banned and a
       // tight reconnect loop would just burn browsers, so retry 3x then park.
@@ -449,7 +501,7 @@ class WhatsAppManager {
     this.armDeadline(id, gen);
 
     try {
-      await this.initWithRetry(client, id, gen);
+      await this.initWithRetry(client, id, gen, () => authenticated);
     } catch (err) {
       if (gen !== this.currentGen(id)) {
         // Superseded by a newer connect/disconnect — the replacement owns the row now.
