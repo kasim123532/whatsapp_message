@@ -26,6 +26,7 @@ const ConnectAccount = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const startedRef = useRef(false);
+  const startedAtRef = useRef(0);
 
   const poll = useCallback(async () => {
     if (!id) return null;
@@ -44,8 +45,14 @@ const ConnectAccount = () => {
         const res = await poll();
         if (cancelled || !res) return;
         // Kick off the very first handshake for a link that was just opened.
-        if (!startedRef.current && res.status === "DISCONNECTED" && !res.running) {
+        if (
+          !startedRef.current &&
+          res.status !== "CONNECTED" &&
+          res.status !== "CONNECTING" &&
+          !res.running
+        ) {
           startedRef.current = true;
+          startedAtRef.current = Date.now();
           apiRequest(`/accounts/${id}/connect`, { method: "POST" }).catch(() => {});
         }
       } catch (err: any) {
@@ -79,7 +86,15 @@ const ConnectAccount = () => {
   const connected = data?.status === "CONNECTED";
   // Once the server has stopped the browser without a QR on screen, the code is
   // gone for good until somebody asks for a new one.
-  const expired = !!data && !connected && !data.qr && !data.running && startedRef.current;
+  // The browser needs a few seconds to launch after /connect, during which the
+  // row still reads "not running" — don't call that expired.
+  const expired =
+    !!data &&
+    !connected &&
+    !data.qr &&
+    !data.running &&
+    data.status !== "CONNECTING" &&
+    (!startedRef.current || now - startedAtRef.current > 8000);
   const msLeft = data?.qrExpiresAt ? data.qrExpiresAt - now : null;
 
   return (

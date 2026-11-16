@@ -14,7 +14,7 @@ import { Plus, Pause, Play, Trash2, MoreVertical, Download, Copy, Pencil, Archiv
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest, API_URL } from "@/lib/api";
+import { apiRequest, API_URL, authHeaders } from "@/lib/api";
 import { toast } from "sonner";
 import { Campaign } from "@/types";
 
@@ -265,7 +265,7 @@ const Campaigns = () => {
   const handleDownloadXlsx = async () => {
     if (!selectedCampaignId) return;
     try {
-      const resp = await fetch(`${API_URL}/campaigns/${selectedCampaignId}/export.xlsx`);
+      const resp = await fetch(`${API_URL}/campaigns/${selectedCampaignId}/export.xlsx`, { headers: authHeaders() });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const blob = await resp.blob();
       const url = window.URL.createObjectURL(blob);

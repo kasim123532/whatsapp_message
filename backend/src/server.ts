@@ -12,8 +12,11 @@ import contactsRouter from "./routes/contacts.js";
 import templatesRouter from "./routes/templates.js";
 import campaignsRouter from "./routes/campaigns.js";
 import proxiesRouter from "./routes/proxies.js";
+import { authRouter, requireAuth, isValidToken, warnIfOpen } from "./lib/auth.js";
 
 dotenv.config();
+
+warnIfOpen();
 
 /**
  * One banned/unlinked account must never kill the other five.
@@ -56,6 +59,8 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 // API Routes
+app.use("/api/auth", authRouter);
+app.use("/api", requireAuth);
 app.use("/api/accounts", accountsRouter);
 app.use("/api/contacts", contactsRouter);
 app.use("/api/templates", templatesRouter);
@@ -70,7 +75,15 @@ app.get("/health", (req, res) => {
 const server = http.createServer(app);
 
 // WebSocket Server
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  // Browsers can't set headers on a WebSocket, so the token rides in the query.
+  verifyClient: (info, done) => {
+    const token = new URL(info.req.url || "/", "http://localhost").searchParams.get("token");
+    if (isValidToken(token)) return done(true);
+    done(false, 401, "Unauthorized");
+  }
+});
 const clients = new Set<WebSocket>();
 
 wss.on("connection", (ws) => {

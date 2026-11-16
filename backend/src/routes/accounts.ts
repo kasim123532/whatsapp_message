@@ -76,6 +76,20 @@ function parseDailyLimit(value: unknown): number | null {
   return parsed as number;
 }
 
+/**
+ * Proxies from the pool that no profile uses yet. Every device gets its own
+ * permanent IP: the value is copied onto the account row and never changes on
+ * its own, so a restart or reconnect always exits through the same address.
+ */
+async function freeProxies(): Promise<string[]> {
+  const [pool, used] = await Promise.all([
+    prisma.proxy.findMany({ orderBy: { createdAt: "asc" } }),
+    prisma.account.findMany({ where: { proxy: { not: "" } }, select: { proxy: true } })
+  ]);
+  const taken = new Set(used.map((a) => canonicalProxy(a.proxy || "")));
+  return pool.map((p) => p.value).filter((value) => !taken.has(canonicalProxy(value)));
+}
+
 function cleanName(value: unknown): string {
   return String(value ?? "").trim().slice(0, MAX_NAME_LENGTH);
 }
@@ -159,6 +173,35 @@ router.delete(
   })
 );
 
+// POST give every profile without a proxy its own unused one from the pool.
+// Live sessions keep their current exit IP until they reconnect.
+router.post(
+  "/assign-proxies",
+  handle(async (_req, res) => {
+    const targets = await prisma.account.findMany({
+      where: { OR: [{ proxy: null }, { proxy: "" }] },
+      orderBy: { createdAt: "asc" }
+    });
+    const free = await freeProxies();
+
+    let assigned = 0;
+    for (const account of targets) {
+      const proxy = free.shift();
+      if (!proxy) break;
+      await prisma.account.update({ where: { id: account.id }, data: { proxy } });
+      assigned++;
+    }
+    res.json({
+      assigned,
+      withoutProxy: targets.length - assigned,
+      message:
+        targets.length > assigned
+          ? `Не хватает прокси: назначено ${assigned}, без прокси осталось ${targets.length - assigned}. Добавьте ещё в «Управление прокси».`
+          : `Назначено прокси: ${assigned}`
+    });
+  })
+);
+
 // POST create account — phone number is optional, it's discovered automatically
 // once the QR code is scanned. A new profile is a draft by default: until a
 // phone is actually linked there is nothing in it worth keeping, so the janitor
@@ -188,11 +231,15 @@ router.post(
       return res.status(400).json({ error: checked.error });
     }
 
+    // No proxy chosen: hand out the next unused one so the device has a
+    // dedicated, permanent IP from its very first connection.
+    const finalProxy = checked.proxy || (await freeProxies())[0] || "";
+
     const account = await prisma.account.create({
       data: {
         phone: cleanPhone,
         name: cleanName(name),
-        proxy: checked.proxy,
+        proxy: finalProxy,
         status: "DISCONNECTED",
         isDraft: draft === undefined ? true : Boolean(draft)
       }

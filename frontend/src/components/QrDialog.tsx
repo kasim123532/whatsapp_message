@@ -3,6 +3,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Loader2, CheckCircle2, RefreshCw, AlertTriangle, Copy } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
@@ -65,14 +66,6 @@ export function QrDialog({ open, onOpenChange, profile }: QrDialogProps) {
     onError: (err: any) => toast.error(err.message || "Не удалось обновить код")
   });
 
-  const cancelMutation = useMutation({
-    mutationFn: (accountId: string) =>
-      apiRequest(`/accounts/${accountId}/cancel`, { method: "POST" }),
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["accounts"] });
-    }
-  });
-
   // A shared link has to keep working after this dialog closes, so the profile
   // stops being a throwaway draft the moment its link leaves the room.
   const keepMutation = useMutation({
@@ -88,22 +81,56 @@ export function QrDialog({ open, onOpenChange, profile }: QrDialogProps) {
 
   const inviteLink = id ? `${window.location.origin}/connect/${id}` : "";
 
-  const copyInviteLink = () => {
+  // navigator.clipboard is undefined outside a secure context (plain HTTP on a
+  // non-localhost host, common for a self-hosted deploy). The fallback has to
+  // mount its textarea INSIDE the dialog: Radix traps focus in the modal, so a
+  // textarea appended to <body> can never take focus and execCommand copies
+  // nothing.
+  const writeToClipboard = async (text: string, host: HTMLElement) => {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch {
+        // permission denied — fall through to the legacy path
+      }
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "0";
+    textarea.style.left = "0";
+    textarea.style.opacity = "0";
+    host.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    host.removeChild(textarea);
+    if (!ok) throw new Error("execCommand copy failed");
+  };
+
+  const copyInviteLink = async (e: React.MouseEvent<HTMLButtonElement>) => {
     if (!inviteLink || !id) return;
-    navigator.clipboard.writeText(inviteLink);
+    // Sharing the link is what makes the profile permanent, whether or not the
+    // clipboard cooperates — the operator can still copy it from the field.
     if (profile?.isDraft) {
       keepMutation.mutate(id);
+    }
+    try {
+      await writeToClipboard(inviteLink, e.currentTarget.parentElement ?? document.body);
+    } catch {
+      toast.error("Не удалось скопировать автоматически — скопируйте ссылку из поля ниже");
+      return;
     }
     toast.success("Ссылка скопирована — профиль сохранён до сканирования");
   };
 
+  // Closing the dialog must NOT touch the session: the QR stays scannable (the
+  // server tears the browser down on its own when the QR window ends), and a
+  // phone that was scanned a moment ago still finishes linking in the background.
   const handleOpenChange = (next: boolean) => {
-    // Closing before anyone scanned means nobody is going to — stop the headless
-    // browser instead of leaving it burning memory. The profile row survives in
-    // the accounts table until its own deadline, so the code can be reopened.
-    if (!next && id && !connected) {
-      cancelMutation.mutate(id);
-    }
     onOpenChange(next);
   };
 
@@ -187,11 +214,18 @@ export function QrDialog({ open, onOpenChange, profile }: QrDialogProps) {
                   <Copy className="mr-2 h-3.5 w-3.5" />
                   Скопировать ссылку для отправки
                 </Button>
+                <Input
+                  readOnly
+                  value={inviteLink}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onClick={(e) => e.currentTarget.select()}
+                  className="mt-2 h-8 text-xs"
+                />
               </div>
               <p className="mt-3 text-[11px] text-muted-foreground text-center">
                 {profile?.isDraft
-                  ? "Если закрыть окно до сканирования, профиль останется в списке ещё на несколько минут, а затем удалится сам."
-                  : "Если закрыть окно до сканирования, попытка подключения будет прервана."}
+                  ? "Окно можно закрыть — QR останется доступен в списке профилей. Если его не отсканировать, профиль удалится сам."
+                  : "Окно можно закрыть — QR останется доступен, пока не истечёт время."}
               </p>
             </>
           )}
@@ -199,7 +233,7 @@ export function QrDialog({ open, onOpenChange, profile }: QrDialogProps) {
 
         <DialogFooter>
           <Button onClick={() => handleOpenChange(false)} className="w-full">
-            {connected ? "Готово" : "Отменить"}
+            {connected ? "Готово" : "Закрыть"}
           </Button>
         </DialogFooter>
       </DialogContent>

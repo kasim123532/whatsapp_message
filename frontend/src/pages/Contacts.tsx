@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest, API_URL } from "@/lib/api";
+import { apiRequest, API_URL, authHeaders } from "@/lib/api";
 import { toast } from "sonner";
 import { Contact, ContactGroup } from "@/types";
 
@@ -581,7 +581,7 @@ const Contacts = () => {
     try {
       const resp = await fetch(`${API_URL}/contacts/subgroups/${selectedSubGroup.subGroupId}/export.xlsx`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify({ ids: source.map((c) => c.id) })
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
