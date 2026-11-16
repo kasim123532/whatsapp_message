@@ -13,32 +13,43 @@ import QrGenerator from "./pages/QrGenerator";
 import ProxyManagement from "./pages/ProxyManagement";
 import ConnectAccount from "./pages/ConnectAccount";
 import NotFound from "./pages/NotFound";
+import { AuthGate } from "@/components/AuthGate";
 import { ThemeProvider } from "next-themes";
 
 const queryClient = new QueryClient();
 
+// The dashboard sits behind a password and needs the live WebSocket; the
+// shareable /connect link is opened by outsiders, so it stays outside both.
+const Dashboard = () => (
+  <AuthGate>
+    <WebSocketProvider>
+      <Routes>
+        <Route path="/" element={<Index />} />
+        <Route path="/accounts" element={<Accounts />} />
+        <Route path="/contacts" element={<Contacts />} />
+        <Route path="/templates" element={<Templates />} />
+        <Route path="/campaigns" element={<Campaigns />} />
+        <Route path="/qr" element={<QrGenerator />} />
+        <Route path="/proxies" element={<ProxyManagement />} />
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </WebSocketProvider>
+  </AuthGate>
+);
+
 const App = () => (
   <ThemeProvider attribute="class" defaultTheme="system" enableSystem storageKey="theme" disableTransitionOnChange>
     <QueryClientProvider client={queryClient}>
-      <WebSocketProvider>
-        <TooltipProvider>
-          <Toaster />
-          <Sonner />
-          <BrowserRouter>
-            <Routes>
-              <Route path="/" element={<Index />} />
-              <Route path="/accounts" element={<Accounts />} />
-              <Route path="/contacts" element={<Contacts />} />
-              <Route path="/templates" element={<Templates />} />
-              <Route path="/campaigns" element={<Campaigns />} />
-              <Route path="/qr" element={<QrGenerator />} />
-              <Route path="/proxies" element={<ProxyManagement />} />
-              <Route path="/connect/:id" element={<ConnectAccount />} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </BrowserRouter>
-        </TooltipProvider>
-      </WebSocketProvider>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
+        <BrowserRouter>
+          <Routes>
+            <Route path="/connect/:id" element={<ConnectAccount />} />
+            <Route path="*" element={<Dashboard />} />
+          </Routes>
+        </BrowserRouter>
+      </TooltipProvider>
     </QueryClientProvider>
   </ThemeProvider>
 );

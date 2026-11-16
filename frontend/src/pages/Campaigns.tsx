@@ -14,7 +14,7 @@ import { Plus, Pause, Play, Trash2, MoreVertical, Download, Copy, Pencil, Archiv
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest, apiUpload, API_URL } from "@/lib/api";
+import { apiRequest, apiUpload, API_URL, authHeaders, authedUrl } from "@/lib/api";
 import { toast } from "sonner";
 import { Campaign } from "@/types";
 
@@ -22,7 +22,7 @@ const SubgroupVariableInfo = ({
   variables,
   onInsert
 }: {
-  variables: string[];
+  variables: { name: string; example: string }[];
   onInsert?: (variable: string) => void;
 }) => {
   if (variables.length === 0) return null;
@@ -34,16 +34,21 @@ const SubgroupVariableInfo = ({
       </div>
       <div className="space-y-1">
         {variables.map((v) => (
-          <div key={v} className="flex items-center justify-between text-sm">
+          <div key={v.name} className="flex items-center justify-between text-sm">
             <button
               type="button"
-              onClick={() => onInsert?.(`{{${v}}}`)}
-              className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono hover:bg-primary/20 hover:text-primary transition-colors cursor-pointer"
+              onClick={() => onInsert?.(`{{${v.name}}}`)}
+              className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono hover:bg-primary/20 hover:text-primary transition-colors cursor-pointer shrink-0"
               title="Нажмите чтобы вставить в текст"
             >
-              {`{{${v}}}`}
+              {`{{${v.name}}}`}
             </button>
-            <span className="text-xs text-muted-foreground truncate ml-2">Пример значения</span>
+            <span
+              className="text-xs text-muted-foreground truncate ml-2"
+              title={v.example || undefined}
+            >
+              {v.example || "—"}
+            </span>
           </div>
         ))}
       </div>
@@ -69,7 +74,7 @@ const PhotoPicker = ({
   const inputRef = useRef<HTMLInputElement>(null);
   const preview = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
-  const shown = preview ?? (existingUrl ? `${API_URL}${existingUrl}` : null);
+  const shown = preview ?? (existingUrl ? authedUrl(existingUrl) : null);
 
   const pick = (f: File | undefined) => {
     if (!f) return;
@@ -165,10 +170,18 @@ const Campaigns = () => {
   // Selected subgroup variables helper
   const getSubgroupVars = (subGroupId: string) => {
     const sg = subgroups.find(s => s.id === subGroupId);
-    if (sg && sg.contacts.length > 0) {
-      return Object.keys(sg.contacts[0].variables || {});
-    }
-    return [];
+    if (!sg || sg.contacts.length === 0) return [];
+    // Имена переменных — по первому контакту, пример значения — первое непустое
+    // значение среди первых контактов (у первого поле может быть пустым).
+    const names = Object.keys(sg.contacts[0].variables || {});
+    const sample = sg.contacts.slice(0, 50);
+    return names.map((name) => {
+      const hit = sample.find((c) => {
+        const val = (c.variables || {})[name];
+        return val !== undefined && val !== null && String(val).trim() !== "";
+      });
+      return { name, example: hit ? String((hit.variables || {})[name]) : "" };
+    });
   };
 
   // Mutations
@@ -367,7 +380,7 @@ const Campaigns = () => {
   const handleDownloadXlsx = async () => {
     if (!selectedCampaignId) return;
     try {
-      const resp = await fetch(`${API_URL}/campaigns/${selectedCampaignId}/export.xlsx`);
+      const resp = await fetch(`${API_URL}/campaigns/${selectedCampaignId}/export.xlsx`, { headers: authHeaders() });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const blob = await resp.blob();
       const url = window.URL.createObjectURL(blob);
@@ -633,7 +646,7 @@ const Campaigns = () => {
                   {/* Message body */}
                   <CardContent className="p-5">
                     {selected.imageUrl && (
-                      <img src={`${API_URL}${selected.imageUrl}`} alt="Фото рассылки" className="mb-3 max-h-64 rounded-xl border border-border" />
+                      <img src={authedUrl(selected.imageUrl)} alt="Фото рассылки" className="mb-3 max-h-64 rounded-xl border border-border" />
                     )}
                     {(selected.message || !selected.imageUrl) && (
                       <div className="bg-muted/50 rounded-xl p-4 text-sm leading-relaxed whitespace-pre-wrap border border-border">

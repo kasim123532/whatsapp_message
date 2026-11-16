@@ -4,6 +4,7 @@ import { localDayKey, localTimeHHMM } from "../lib/time.js";
 import { notifyCampaign } from "../lib/campaignEvents.js";
 import { mediaExists, mediaPath } from "../lib/campaignMedia.js";
 import { MessageMedia } from "whatsapp-web.js";
+import { logToSheet } from "../lib/sheetsLog.js";
 
 /** How many times a recipient is tried before it is written off as FAILED. */
 const MAX_ATTEMPTS = Number(process.env.MAX_SEND_ATTEMPTS) || 3;
@@ -93,8 +94,49 @@ class CampaignScheduler {
     // Immediate first tick so a restart recovers stale SENDING rows within
     // seconds instead of waiting out the interval. Sends are still gated on
     // live CONNECTED clients, so nothing fires before WhatsApp is back.
-    void this.tick().catch((err) => console.error("[Scheduler] Error in initial tick:", err));
+    // Сначала один раз проставляем порядок отправки у старых кампаний.
+    void this.backfillOrder()
+      .catch((err) => console.error("[Scheduler] backfillOrder failed:", err))
+      .then(() => this.tick())
+      .catch((err) => console.error("[Scheduler] Error in initial tick:", err));
     this.timer = setInterval(() => this.tick(), 5000); // Check every 5 seconds
+  }
+
+  // Кампании, созданные до появления `position`, имеют position=0 у всех получателей.
+  // Раскладываем их по порядку контактов в подгруппе (как они идут в списке).
+  private async backfillOrder() {
+    const campaigns = await prisma.campaign.findMany({
+      where: { status: { not: "COMPLETED" } },
+      select: { id: true, groupId: true }
+    });
+    for (const camp of campaigns) {
+      const agg = await prisma.campaignRecipient.aggregate({
+        where: { campaignId: camp.id },
+        _max: { position: true },
+        _count: true
+      });
+      if ((agg._count ?? 0) < 2 || (agg._max.position ?? 0) > 0) continue;
+
+      const contacts = await prisma.contact.findMany({
+        where: { subGroupId: camp.groupId },
+        select: { id: true },
+        orderBy: { createdAt: "asc" }
+      });
+      const rows = await prisma.campaignRecipient.findMany({
+        where: { campaignId: camp.id },
+        select: { id: true, contactId: true }
+      });
+      const posByContact = new Map(contacts.map((c, i) => [c.id, i]));
+      const updates = rows
+        .filter((r) => posByContact.has(r.contactId))
+        .map((r) =>
+          prisma.campaignRecipient.update({ where: { id: r.id }, data: { position: posByContact.get(r.contactId)! } })
+        );
+      for (let i = 0; i < updates.length; i += 500) {
+        await prisma.$transaction(updates.slice(i, i + 500));
+      }
+      console.log(`[Scheduler] Backfilled send order for campaign ${camp.id} (${updates.length} recipients).`);
+    }
   }
 
   stop() {
@@ -293,7 +335,7 @@ class CampaignScheduler {
         OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
       },
       include: { contact: true },
-      orderBy: { updatedAt: "asc" },
+      orderBy: [{ position: "asc" }, { updatedAt: "asc" }],
       take: available.length
     });
 
@@ -334,6 +376,56 @@ class CampaignScheduler {
     );
 
     const sentLog = campaign.imageFile ? `[фото]${finalMessage ? " " + finalMessage : ""}` : finalMessage;
+
+    // Предпроверка: если номера нет в WhatsApp — сразу FAILED, без ретраев и без задержки аккаунта.
+    if (recipient.contact.whatsappStatus !== "exists") {
+      let registered: boolean | null = null;
+      try {
+        const digits = recipient.contact.phone.replace(/\D/g, "");
+        registered = await Promise.race([
+          client.isRegisteredUser(`${digits}@c.us`),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error("check timeout")), 15000))
+        ]);
+      } catch (e: any) {
+        // Проверка не удалась (таймаут/сбой) — не бракуем номер, пробуем отправить как раньше.
+        console.warn(`[Scheduler] Registration check failed for ${recipient.contact.phone}: ${e?.message}`);
+      }
+
+      if (registered === false) {
+        const nowFail = new Date();
+        await prisma.contact
+          .update({ where: { id: recipient.contact.id }, data: { whatsappStatus: "not_found" } })
+          .catch(() => {});
+        await prisma.campaignRecipient.update({
+          where: { id: recipient.id },
+          data: {
+            status: "FAILED",
+            attempts: recipient.attempts + 1,
+            nextAttemptAt: null,
+            sentAt: nowFail,
+            error: "Нет WhatsApp",
+            senderPhone: sender.phone,
+            senderAccountId: sender.id,
+            sentText: sentLog
+          }
+        });
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { failed: { increment: 1 }, pending: { decrement: 1 } }
+        });
+        logToSheet({
+          campaign: campaign.name,
+          phone: recipient.contact.phone,
+          name: recipient.contact.name,
+          sender: sender.phone ?? "",
+          status: "FAILED",
+          error: "Нет WhatsApp",
+          text: sentLog
+        });
+        console.warn(`[Scheduler] ${recipient.contact.phone} is not on WhatsApp — marked FAILED, no delay.`);
+        return;
+      }
+    }
 
     let sentSuccess = false;
     let errorMsg = "";
@@ -386,6 +478,14 @@ class CampaignScheduler {
         where: { id: campaign.id },
         data: { sent: { increment: 1 }, pending: { decrement: 1 } }
       });
+      logToSheet({
+        campaign: campaign.name,
+        phone: recipient.contact.phone,
+        name: recipient.contact.name,
+        sender: sender.phone ?? "",
+        status: "SENT",
+        text: sentLog
+      });
       return;
     }
 
@@ -420,6 +520,15 @@ class CampaignScheduler {
     await prisma.campaign.update({
       where: { id: campaign.id },
       data: { failed: { increment: 1 }, pending: { decrement: 1 } }
+    });
+    logToSheet({
+      campaign: campaign.name,
+      phone: recipient.contact.phone,
+      name: recipient.contact.name,
+      sender: sender.phone ?? "",
+      status: "FAILED",
+      error: errorMsg,
+      text: sentLog
     });
     console.warn(`[Scheduler] Giving up on ${recipient.contact.phone} after ${attempts} attempts: ${errorMsg}`);
   }

@@ -166,6 +166,16 @@ const Accounts = () => {
     }
   });
 
+  const assignProxiesMutation = useMutation({
+    mutationFn: () => apiRequest("/accounts/assign-proxies", { method: "POST" }),
+    onSuccess: (res: { assigned: number; withoutProxy: number; message: string }) => {
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      if (res.withoutProxy > 0) toast.warning(res.message);
+      else toast.success(res.message);
+    },
+    onError: (err: any) => toast.error(err.message || "Не удалось назначить прокси")
+  });
+
   const connectMutation = useMutation({
     mutationFn: (id: string) =>
       apiRequest(`/accounts/${id}/connect`, { method: "POST" }),
@@ -383,10 +393,19 @@ const Accounts = () => {
               Номера, с которых уходят рассылки. Профиль без отсканированного кода удаляется сам.
             </p>
           </div>
-          <Button className="gap-2" onClick={() => setAddOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Добавить аккаунт
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => assignProxiesMutation.mutate()}
+              disabled={assignProxiesMutation.isPending}
+            >
+              Назначить прокси
+            </Button>
+            <Button className="gap-2" onClick={() => setAddOpen(true)}>
+              <Plus className="h-4 w-4" />
+              Добавить аккаунт
+            </Button>
+          </div>
         </motion.div>
 
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">

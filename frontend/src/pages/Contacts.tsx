@@ -12,21 +12,58 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Plus, Search, Trash2, Users, Phone, FolderPlus, ChevronRight, ChevronDown,
   Import, CheckCircle2, XCircle, Loader2, FolderOpen, UserPlus,
-  ChevronLeft, ArrowRightLeft, Download, X
+  ChevronLeft, ArrowRightLeft, Download, X, Folder, ListTree, ArrowLeft
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest, API_URL } from "@/lib/api";
+import { apiRequest, API_URL, authHeaders } from "@/lib/api";
 import { toast } from "sonner";
 import { Contact, ContactGroup } from "@/types";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
+// Состояние дерева папок переживает перезагрузку страницы (браузерный localStorage).
+const UI_KEY = "contacts.ui.v1";
+type UiState = {
+  expanded?: Record<string, boolean>;
+  viewMode?: "tree" | "folders";
+  folderId?: string | null;
+  selected?: { groupId: string; subGroupId: string } | null;
+};
+const loadUi = (): UiState => {
+  try {
+    return JSON.parse(localStorage.getItem(UI_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+};
+
 const Contacts = () => {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [selectedSubGroup, setSelectedSubGroup] = useState<{ groupId: string; subGroupId: string } | null>(null);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [selectedSubGroup, setSelectedSubGroup] = useState<{ groupId: string; subGroupId: string } | null>(
+    () => loadUi().selected ?? null
+  );
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() => loadUi().expanded ?? {});
+  // "tree" — раскрывающийся список, "folders" — как в проводнике (заходим в папку).
+  const [viewMode, setViewMode] = useState<"tree" | "folders">(() => loadUi().viewMode ?? "tree");
+  const [openFolderId, setOpenFolderId] = useState<string | null>(() => loadUi().folderId ?? null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        UI_KEY,
+        JSON.stringify({
+          expanded: expandedGroups,
+          viewMode,
+          folderId: openFolderId,
+          selected: selectedSubGroup
+        } satisfies UiState)
+      );
+    } catch {
+      /* localStorage недоступен — просто не запоминаем */
+    }
+  }, [expandedGroups, viewMode, openFolderId, selectedSubGroup]);
 
   // Dialog states
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
@@ -237,9 +274,10 @@ const Contacts = () => {
   });
 
   const toggleGroup = (groupId: string) => {
+    // По умолчанию папка раскрыта (undefined), поэтому «текущее» значение — !== false.
     setExpandedGroups((prev) => ({
       ...prev,
-      [groupId]: !prev[groupId]
+      [groupId]: prev[groupId] === false
     }));
   };
 
@@ -581,7 +619,7 @@ const Contacts = () => {
     try {
       const resp = await fetch(`${API_URL}/contacts/subgroups/${selectedSubGroup.subGroupId}/export.xlsx`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify({ ids: source.map((c) => c.id) })
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -693,9 +731,29 @@ const Contacts = () => {
             >
               <Card className="h-fit">
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base font-display flex items-center gap-2">
-                    <Users className="h-4 w-4 text-primary" /> Группы и подгруппы
-                  </CardTitle>
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="text-base font-display flex items-center gap-2">
+                      <Users className="h-4 w-4 text-primary" /> Группы и подгруппы
+                    </CardTitle>
+                    <div className="flex rounded-md border border-border overflow-hidden">
+                      <button
+                        type="button"
+                        title="Списком (раскрывающиеся папки)"
+                        onClick={() => setViewMode("tree")}
+                        className={`p-1.5 transition-colors ${viewMode === "tree" ? "bg-accent text-accent-foreground" : "hover:bg-muted"}`}
+                      >
+                        <ListTree className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        title="Папками, как в проводнике"
+                        onClick={() => setViewMode("folders")}
+                        className={`p-1.5 transition-colors ${viewMode === "folders" ? "bg-accent text-accent-foreground" : "hover:bg-muted"}`}
+                      >
+                        <Folder className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
                 </CardHeader>
                 <CardContent className="space-y-1">
                   {groups.length === 0 && (
@@ -703,7 +761,103 @@ const Contacts = () => {
                       Нет групп. Создайте первую!
                     </p>
                   )}
-                  {groups.map((group) => {
+                  {viewMode === "folders" &&
+                    (() => {
+                      const folder = openFolderId ? groups.find((g) => g.id === openFolderId) : null;
+                      if (!folder) {
+                        // Корень: все папки (группы)
+                        return (
+                          <div className="space-y-0.5">
+                            {groups.map((group) => (
+                              <div
+                                key={group.id}
+                                className="flex items-center gap-2 py-2 px-2 rounded-md cursor-pointer hover:bg-muted/50 transition-colors group/item"
+                                onDoubleClick={() => setOpenFolderId(group.id)}
+                                onClick={() => setOpenFolderId(group.id)}
+                              >
+                                <Folder className="h-5 w-5 text-primary fill-primary/20" />
+                                <span className="text-sm font-medium flex-1">{group.name}</span>
+                                <Badge variant="secondary" className="text-xs">
+                                  {group.subGroups.reduce((a, sg) => a + sg.contacts.length, 0)}
+                                </Badge>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteGroup(group.id);
+                                  }}
+                                  className="p-1 rounded hover:bg-destructive/10 opacity-0 group-hover/item:opacity-100 transition-all"
+                                  title="Удалить группу"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      }
+                      // Внутри папки: кнопка «назад», хлебные крошки и подгруппы
+                      return (
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1 pb-2 border-b border-border">
+                            <button
+                              onClick={() => setOpenFolderId(null)}
+                              className="p-1 rounded hover:bg-muted transition-colors"
+                              title="Назад ко всем папкам"
+                            >
+                              <ArrowLeft className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => setOpenFolderId(null)}
+                              className="text-xs text-muted-foreground hover:text-foreground"
+                            >
+                              Все папки
+                            </button>
+                            <ChevronRight className="h-3 w-3 text-muted-foreground" />
+                            <span className="text-sm font-medium truncate flex-1">{folder.name}</span>
+                            <button
+                              onClick={() => {
+                                setTargetGroupId(folder.id);
+                                setSubGroupDialogOpen(true);
+                              }}
+                              className="p-1 rounded hover:bg-muted transition-colors"
+                              title="Добавить подгруппу"
+                            >
+                              <Plus className="h-3.5 w-3.5 text-muted-foreground" />
+                            </button>
+                          </div>
+                          {folder.subGroups.map((sg) => {
+                            const isActive = selectedSubGroup?.subGroupId === sg.id;
+                            return (
+                              <div
+                                key={sg.id}
+                                className={`flex items-center gap-2 py-1.5 px-2 rounded-md cursor-pointer transition-colors group/sub
+                                ${isActive ? "bg-accent text-accent-foreground" : "hover:bg-muted/50"}`}
+                                onClick={() => setSelectedSubGroup({ groupId: folder.id, subGroupId: sg.id })}
+                              >
+                                <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-sm flex-1">{sg.name}</span>
+                                <Badge variant="secondary" className="text-xs">
+                                  {sg.contacts.length}
+                                </Badge>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteSubGroup(sg.id);
+                                  }}
+                                  className="p-0.5 rounded hover:bg-destructive/10 opacity-0 group-hover/sub:opacity-100 transition-all"
+                                >
+                                  <Trash2 className="h-3 w-3 text-destructive" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                          {folder.subGroups.length === 0 && (
+                            <p className="text-xs text-muted-foreground py-2 pl-2">Папка пуста</p>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  {viewMode === "tree" && groups.map((group) => {
                     const isExpanded = expandedGroups[group.id] !== false; // expanded by default
                     return (
                       <div key={group.id}>

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { WS_URL } from "@/lib/api";
+import { WS_URL, getToken } from "@/lib/api";
 import { toast } from "sonner";
 import { WhatsAppProfile } from "@/types";
 
@@ -20,7 +20,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
 
       console.log(`[WS] Connecting to ${WS_URL}...`);
-      const ws = new WebSocket(WS_URL);
+      const ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(getToken() ?? "")}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
