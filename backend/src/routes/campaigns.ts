@@ -14,6 +14,7 @@ import {
   sniffImage
 } from "../lib/campaignMedia.js";
 import fs from "fs";
+import crypto from "crypto";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_IMAGE_BYTES, files: 1 } });
@@ -439,6 +440,80 @@ router.post("/:id/pause", async (req, res) => {
     notifyCampaign(id, "PAUSED");
     res.json({ message: "Campaign paused", status: updated.status, isPaused: updated.isPaused });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST duplicate: same text/photo/senders/settings and the SAME recipients as the
+// source campaign (its recipient rows, not the group's current contents), all
+// reset to PENDING. The copy is a paused DRAFT — the user starts it explicitly.
+router.post("/:id/duplicate", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const src = await prisma.campaign.findUnique({
+      where: { id },
+      include: { recipients: { select: { contactId: true, position: true }, orderBy: { position: "asc" } } }
+    });
+    if (!src) return res.status(404).json({ error: "Campaign not found" });
+    if (src.recipients.length === 0) return res.status(400).json({ error: "У рассылки нет получателей" });
+
+    let imageFile: string | null = null;
+    let imageMime: string | null = null;
+    if (src.imageFile && mediaExists(src.imageFile)) {
+      // Own file for the copy: deleting one campaign removes its photo from disk.
+      ensureMediaDir();
+      const ext = src.imageFile.split(".").pop() || "jpg";
+      imageFile = `${crypto.randomUUID()}-${Date.now()}.${ext}`;
+      imageMime = src.imageMime;
+      fs.copyFileSync(mediaPath(src.imageFile)!, `${MEDIA_DIR}/${imageFile}`);
+    }
+
+    const baseName = src.name.replace(/ \(копия(?: \d+)?\)$/, "");
+    const copies = await prisma.campaign.count({ where: { name: { startsWith: `${baseName} (копия` } } });
+    const name = `${baseName} (копия${copies ? ` ${copies + 1}` : ""})`.slice(0, MAX_NAME_LENGTH);
+
+    let created;
+    try {
+      created = await prisma.$transaction(async (tx) => {
+        const campaign = await tx.campaign.create({
+          data: {
+            name,
+            phones: src.phones,
+            accountIds: src.accountIds,
+            message: src.message,
+            imageFile,
+            imageMime,
+            groupName: src.groupName,
+            groupId: src.groupId,
+            minInterval: src.minInterval,
+            maxInterval: src.maxInterval,
+            sendFrom: src.sendFrom,
+            sendTo: src.sendTo,
+            sent: 0,
+            pending: src.recipients.length,
+            failed: 0,
+            isPaused: true,
+            status: "DRAFT"
+          }
+        });
+        await tx.campaignRecipient.createMany({
+          data: src.recipients.map((r, i) => ({
+            campaignId: campaign.id,
+            contactId: r.contactId,
+            status: "PENDING",
+            position: i
+          }))
+        });
+        return campaign;
+      });
+    } catch (err) {
+      removeMedia(imageFile);
+      throw err;
+    }
+
+    res.status(201).json(toDto(created, { sent: 0, pending: src.recipients.length, failed: 0 }));
+  } catch (err: any) {
+    console.error(`[campaigns] duplicate of ${id} failed:`, err?.message ?? err);
     res.status(500).json({ error: err.message });
   }
 });

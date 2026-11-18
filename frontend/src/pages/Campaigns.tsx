@@ -260,6 +260,16 @@ const Campaigns = () => {
     onError: (err: any) => toast.error(err.message)
   });
 
+  const duplicateMutation = useMutation({
+    mutationFn: (id: string) => apiRequest(`/campaigns/${id}/duplicate`, { method: "POST" }),
+    onSuccess: (copy: { id: string; name: string }) => {
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      setSelectedId(copy.id);
+      toast.success(`Создана копия: ${copy.name}. Проверьте и нажмите «Запустить»`);
+    },
+    onError: (err: any) => toast.error(err.message)
+  });
+
   const togglePauseMutation = useMutation({
     mutationFn: ({ id, isPaused }: { id: string; isPaused: boolean }) =>
       apiRequest(`/campaigns/${id}/${isPaused ? "pause" : "start"}`, { method: "POST" }),
@@ -688,6 +698,14 @@ const Campaigns = () => {
                 <div className="flex gap-2 pt-3 flex-wrap">
                   <Button variant="outline" onClick={handleDownloadXlsx}>
                     <Download className="h-4 w-4 mr-2" /> Скачать лог (XLSX)
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => duplicateMutation.mutate(selected.id)}
+                    disabled={duplicateMutation.isPending}
+                  >
+                    {duplicateMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Copy className="h-4 w-4 mr-2" />}
+                    Копировать
                   </Button>
                   <Button
                     variant="outline"
